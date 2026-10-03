@@ -1,8 +1,14 @@
 // Deployments.ai modification: jobs go to the DynamoDB `deep_research` NuQ
-// queue instead of BullMQ.
+// queue instead of BullMQ, and the request takes a `renderer` that the job
+// applies to every page it scrapes.
 import { v7 as uuidv7 } from "uuid";
 import { Request, Response } from "express";
-import { ErrorResponse, extractOptions, RequestWithAuth } from "./types";
+import {
+  ErrorResponse,
+  extractOptions,
+  rendererSchema,
+  RequestWithAuth,
+} from "./types";
 import { deepResearchQueue } from "../../services/worker/nuq";
 import * as Sentry from "@sentry/node";
 import { saveDeepResearch } from "../../lib/deep-research/deep-research-redis";
@@ -43,6 +49,7 @@ const deepResearchRequestSchema = z
     // @deprecated Use query instead
     topic: z.string().describe("The topic or question to research").optional(),
     jsonOptions: extractOptions.optional(),
+    renderer: rendererSchema,
   })
   .refine(data => data.query || data.topic, {
     message: "Either query or topic must be provided",

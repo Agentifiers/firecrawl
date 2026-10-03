@@ -4,7 +4,7 @@ import { searchAndScrapeSearchResult } from "../../controllers/v1/search";
 import { ResearchLLMService, ResearchStateManager } from "./research-manager";
 import { logDeepResearch } from "../../services/logging/log_job";
 import { billTeam } from "../../services/billing/credit_billing";
-import { ExtractOptions } from "../../controllers/v1/types";
+import type { ExtractOptions, Renderer } from "../../controllers/v1/types";
 import { CostTracking } from "../cost-tracking";
 import { getACUCTeam } from "../../controllers/auth";
 import { includesFormat } from "../format-utils";
@@ -22,6 +22,8 @@ export interface DeepResearchServiceOptions {
   formats: string[];
   jsonOptions?: ExtractOptions;
   apiKeyId: number | null;
+  // Deployments.ai modification: browser renderer for every page scrape.
+  renderer: Renderer;
 }
 
 export async function performDeepResearch(options: DeepResearchServiceOptions) {
@@ -152,6 +154,7 @@ export async function performDeepResearch(options: DeepResearchServiceOptions) {
               maxAge: 4 * 60 * 60 * 1000,
               storeInCache: true,
               proxy: "basic",
+              renderer: options.renderer,
             },
             apiKeyId: apiKeyId,
             requestId: researchId,

@@ -66,6 +66,7 @@ const processDeepResearchJob = async (job: NuQJob<DeepResearchJobData>) => {
       formats: job.data.request.formats,
       jsonOptions: job.data.request.jsonOptions,
       apiKeyId: job.data.apiKeyId,
+      renderer: job.data.request.renderer,
     });
 
     if (result.success) {
@@ -106,6 +107,7 @@ const processGenerateLlmsTxtJob = async (job: NuQJob<LlmsTxtJobData>) => {
       showFullText: job.data.request.showFullText,
       cache: job.data.request.cache,
       apiKeyId: job.data.apiKeyId,
+      renderer: job.data.request.renderer,
     });
 
     if (result.success) {

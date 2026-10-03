@@ -14,6 +14,7 @@ import { getModel } from "../generic-ai";
 import { generateCompletions } from "../../scraper/scrapeURL/transformers/llmExtract";
 import { CostTracking } from "../cost-tracking";
 import { getACUCTeam } from "../../controllers/auth";
+import type { Renderer } from "../../controllers/v1/types";
 interface GenerateLLMsTextServiceOptions {
   generationId: string;
   teamId: string;
@@ -22,6 +23,8 @@ interface GenerateLLMsTextServiceOptions {
   maxUrls: number;
   showFullText: boolean;
   cache?: boolean;
+  // Deployments.ai modification: browser renderer for every page scrape.
+  renderer: Renderer;
 }
 
 const descriptionSchema = z.object({
@@ -73,6 +76,7 @@ export async function performGenerateLlmsTxt(
     showFullText,
     cache = true,
     apiKeyId,
+    renderer,
   } = options;
   const startTime = Date.now();
   const logger = _logger.child({
@@ -179,7 +183,7 @@ export async function performGenerateLlmsTxt(
               },
               [],
               logger,
-              { onlyMainContent: true },
+              { onlyMainContent: true, renderer },
             );
 
             if (!document || !document.markdown) {

@@ -14,6 +14,10 @@ import {
   playwrightMaxReasonableTime,
   scrapeURLWithPlaywright,
 } from "./playwright";
+import {
+  lightpandaMaxReasonableTime,
+  scrapeURLWithLightpanda,
+} from "./lightpanda";
 import { indexMaxReasonableTime, scrapeURLWithIndex } from "./index/index";
 import {
   scrapeURLWithWikipedia,
@@ -45,6 +49,7 @@ export type Engine =
   | "fire-engine(retry);chrome-cdp;stealth"
   | "fire-engine;tlsclient"
   | "fire-engine;tlsclient;stealth"
+  | "lightpanda"
   | "playwright"
   | "fetch"
   | "pdf"
@@ -60,6 +65,8 @@ const useFireEngine =
 const usePlaywright =
   config.PLAYWRIGHT_MICROSERVICE_URL !== "" &&
   config.PLAYWRIGHT_MICROSERVICE_URL !== undefined;
+const useLightpanda =
+  config.LIGHTPANDA_CDP_URL !== "" && config.LIGHTPANDA_CDP_URL !== undefined;
 const useWikipedia =
   config.WIKIPEDIA_ENTERPRISE_USERNAME !== undefined &&
   config.WIKIPEDIA_ENTERPRISE_USERNAME !== "" &&
@@ -83,6 +90,7 @@ const engines: Engine[] = [
         "fire-engine;tlsclient;stealth" as const,
       ]
     : []),
+  ...(useLightpanda ? ["lightpanda" as const] : []),
   ...(usePlaywright ? ["playwright" as const] : []),
   "fetch",
   "pdf",
@@ -184,6 +192,7 @@ const engineHandlers: {
   "fire-engine(retry);chrome-cdp;stealth": scrapeURLWithFireEngineChromeCDP,
   "fire-engine;tlsclient": scrapeURLWithFireEngineTLSClient,
   "fire-engine;tlsclient;stealth": scrapeURLWithFireEngineTLSClient,
+  lightpanda: scrapeURLWithLightpanda,
   playwright: scrapeURLWithPlaywright,
   fetch: scrapeURLWithFetch,
   pdf: scrapePDF,
@@ -210,6 +219,7 @@ const engineMRTs: {
     fireEngineMaxReasonableTime(meta, "tlsclient"),
   "fire-engine;tlsclient;stealth": meta =>
     fireEngineMaxReasonableTime(meta, "tlsclient"),
+  lightpanda: lightpandaMaxReasonableTime,
   playwright: playwrightMaxReasonableTime,
   fetch: fetchMaxReasonableTime,
   pdf: pdfMaxReasonableTime,
@@ -395,6 +405,27 @@ const engineOptions: {
       disableAdblock: false,
     },
     quality: 20,
+  },
+  lightpanda: {
+    features: {
+      actions: false,
+      waitFor: true,
+      screenshot: false,
+      "screenshot@fullScreen": false,
+      pdf: false,
+      document: false,
+      audio: false,
+      video: false,
+      atsv: false,
+      location: false,
+      mobile: false,
+      skipTlsVerification: true,
+      useFastMode: false,
+      stealthProxy: false,
+      branding: false,
+      disableAdblock: false,
+    },
+    quality: 30,
   },
   "fire-engine;tlsclient": {
     features: {
@@ -716,12 +747,22 @@ export async function buildFallbackList(meta: Meta): Promise<
     unsupportedFeatures: Set<FeatureFlag>;
   }[] = [];
 
+  // `renderer` chooses the browser engine: "chromium" drops Lightpanda,
+  // "lightpanda" drops the Chromium (Playwright service) engine, "auto" keeps
+  // both (Lightpanda ranks first). A forced engine list is used as given.
+  const excludedEngine: Engine | null =
+    meta.options.renderer === "chromium"
+      ? "lightpanda"
+      : meta.options.renderer === "lightpanda"
+        ? "playwright"
+        : null;
+
   const currentEngines =
     meta.internalOptions.forceEngine !== undefined
       ? Array.isArray(meta.internalOptions.forceEngine)
         ? meta.internalOptions.forceEngine
         : [meta.internalOptions.forceEngine]
-      : _engines;
+      : _engines.filter(engine => engine !== excludedEngine);
 
   for (const engine of currentEngines) {
     const supportedFlags = new Set([

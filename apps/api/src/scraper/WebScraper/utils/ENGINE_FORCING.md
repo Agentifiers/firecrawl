@@ -30,6 +30,7 @@ The engine forcing is configured via the `FORCED_ENGINE_DOMAINS` environment var
 - `fire-engine;tlsclient` - TLS fingerprinting for anti-bot bypass
 - `fire-engine;chrome-cdp;stealth` - Chrome CDP with stealth mode
 - `fire-engine;tlsclient;stealth` - TLS client with stealth mode
+- `lightpanda` - Lightpanda browser over CDP (requires `LIGHTPANDA_CDP_URL`)
 - `playwright` - Direct Playwright integration
 - `fetch` - Simple HTTP requests
 - `pdf` - PDF document parsing

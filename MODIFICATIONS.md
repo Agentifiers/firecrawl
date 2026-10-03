@@ -188,3 +188,41 @@ Dropped features (hosted-only or dependent on removed Redis/RabbitMQ state):
   `FIRECRAWL_DYNAMODB_TABLE`. The repository's local Compose stack runs it
   against DynamoDB Local before starting the API; it refuses to run without an
   endpoint override because AWS tables are created by Terraform.
+
+### 2026-10-03 — Lightpanda engine and `renderer` option
+
+- Added the `lightpanda` scrape engine
+  (`src/scraper/scrapeURL/engines/lightpanda/index.ts`). It connects to a
+  Lightpanda browser over CDP with `playwright-core` once per scrape and
+  follows upstream `apps/playwright-service-ts`: 1280×800 viewport, blocked
+  service workers, `ignoreHTTPSErrors` from `skipTlsVerification`, a `Cookie`
+  request header seeded into the context cookie jar on the last two host
+  labels, the other headers sent as extra HTTP headers, ad-serving domains and
+  private/internal hosts aborted, `load` navigation, `waitFor`, and the
+  response body for JSON and `text/plain`. Connection, navigation and timeout
+  failures raise `EngineError`; HTTP 401, 403 and 429 also raise
+  `EngineError` unless the request forced Lightpanda, so the waterfall tries
+  Chromium. Closing the CDP connection aborts the navigation when the scrape
+  is aborted.
+- `src/scraper/scrapeURL/engines/index.ts`: registered `lightpanda` (enabled
+  when `LIGHTPANDA_CDP_URL` is set; Playwright's feature flags; quality 30,
+  above `playwright` at 20; maximum reasonable time `waitFor` + 15 s).
+  `buildFallbackList` drops `lightpanda` for `renderer: "chromium"` and
+  `playwright` for `renderer: "lightpanda"`; a forced engine list is used
+  unchanged. `src/scraper/WebScraper/utils/ENGINE_FORCING.md` lists the new
+  engine.
+- `renderer` (`"auto" | "lightpanda" | "chromium"`, default `"auto"`) is a
+  scrape option in the v1 and v2 `baseScrapeOptions`
+  (`src/controllers/v1/types.ts` exports `rendererSchema`), so scrape, batch
+  scrape, crawl, search and extract carry it to every page scrape.
+- `/v1/deep-research` and `/v1/llmstxt` take a top-level `renderer`. It is
+  stored with the queued job and `src/services/queue-worker.ts` passes it to
+  `performDeepResearch` (search-result scrapes) and `performGenerateLlmsTxt`
+  (page scrapes).
+- `src/config.ts`: added `LIGHTPANDA_CDP_URL`.
+- `package.json`/`pnpm-lock.yaml`: added `playwright-core` 1.58.1.
+- Added `src/scraper/scrapeURL/engines/__tests__/buildFallbackList.test.ts`
+  (engine order per renderer) and
+  `src/scraper/scrapeURL/engines/lightpanda/__tests__/lightpanda.test.ts`
+  (401/403/429 handling, CDP connection failure) with a mocked
+  `playwright-core`.

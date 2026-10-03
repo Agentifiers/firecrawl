@@ -420,6 +420,14 @@ function transformIframeSelector(selector: string): string {
   });
 }
 
+// Deployments.ai modification: browser engine selection. "auto" tries
+// Lightpanda and falls back to Chromium (Playwright service); "lightpanda" and
+// "chromium" use only that browser (see scraper/scrapeURL/engines/index.ts).
+export const rendererSchema = z
+  .enum(["auto", "lightpanda", "chromium"])
+  .prefault("auto");
+export type Renderer = z.infer<typeof rendererSchema>;
+
 const baseScrapeOptions = z.strictObject({
   formats: z
     .enum([
@@ -524,6 +532,7 @@ const baseScrapeOptions = z.strictObject({
   useMock: z.string().optional(),
   blockAds: z.boolean().prefault(true),
   proxy: z.enum(["basic", "stealth", "enhanced", "auto"]).prefault("basic"),
+  renderer: rendererSchema,
   maxAge: z
     .int()
     .gte(0)
@@ -1638,6 +1647,8 @@ export const generateLLMsTextRequestSchema = z.object({
     .prefault(true)
     .describe("Whether to use cached content if available"),
   __experimental_stream: z.boolean().optional(),
+  // Deployments.ai modification: renderer for the page scrapes this job runs.
+  renderer: rendererSchema,
 });
 
 export type GenerateLLMsTextRequest = z.infer<

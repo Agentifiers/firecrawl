@@ -14,6 +14,7 @@ import {
 import {
   agentOptionsExtract,
   AuthCreditUsageChunk,
+  rendererSchema,
   ScrapeOptions as V1ScrapeOptions,
 } from "../v1/types";
 import type { InternalOptions } from "../../scraper/scrapeURL";
@@ -688,6 +689,7 @@ const baseScrapeOptions = z.strictObject({
   useMock: z.string().optional(),
   blockAds: z.boolean().prefault(true),
   proxy: z.enum(["basic", "stealth", "enhanced", "auto"]).prefault("auto"),
+  renderer: rendererSchema,
   maxAge: z.int().gte(0).optional(),
   minAge: z.int().gte(0).optional(),
   storeInCache: z.boolean().prefault(true),

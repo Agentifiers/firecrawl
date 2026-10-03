@@ -204,6 +204,9 @@ importers:
       pg:
         specifier: ^8.16.3
         version: 8.16.3
+      playwright-core:
+        specifier: 1.58.1
+        version: 1.58.1
       prettier:
         specifier: ^3.6.2
         version: 3.6.2
@@ -3807,6 +3810,11 @@ packages:
   pidtree@0.6.0:
     resolution: {integrity: sha512-eG2dWTVw5bzqGRztnHExczNxt5VGsE6OwTeCG3fdUf9KBsZzO3R5OIIIzWR+iZA0NtZ+RDVdaoE2dK1cn6jH4g==}
     engines: {node: '>=0.10'}
+    hasBin: true
+
+  playwright-core@1.58.1:
+    resolution: {integrity: sha512-bcWzOaTxcW+VOOGBCQgnaKToLJ65d6AqfLVKEWvexyS3AS6rbXl+xdpYRMGSRBClPvyj44njOWoxjNdL/H9UNg==}
+    engines: {node: '>=18'}
     hasBin: true
 
   postcss@8.5.19:
@@ -7812,6 +7820,8 @@ snapshots:
   picomatch@4.0.5: {}
 
   pidtree@0.6.0: {}
+
+  playwright-core@1.58.1: {}
 
   postcss@8.5.19:
     dependencies:
