@@ -2,28 +2,13 @@ import { config } from "../../config";
 import { logger as _logger } from "../../lib/logger";
 import { jobDurationSeconds } from "../../lib/job-metrics";
 import { processJobInternal } from "./scrape-worker";
-import { NuQJob } from "./nuq";
+import type { NuQ } from "./nuq";
+import { consumeJobs } from "./nuq/consumer";
+import type { ScrapeJobData } from "../../types";
 import { register } from "prom-client";
 import Express from "express";
 import { initializeBlocklist } from "../../scraper/WebScraper/utils/blocklist";
 import { initializeEngineForcing } from "../../scraper/WebScraper/utils/engine-forcing";
-
-export type WorkerQueue = {
-  getJobToProcess(logger?: any): Promise<NuQJob<any, any> | null>;
-  renewLock(id: string, lock: string, logger?: any): Promise<boolean>;
-  jobFinish(
-    id: string,
-    lock: string,
-    returnvalue: any | null,
-    logger?: any,
-  ): Promise<boolean>;
-  jobFail(
-    id: string,
-    lock: string,
-    failedReason: string,
-    logger?: any,
-  ): Promise<boolean>;
-};
 
 async function withTimeout<T>(
   promise: Promise<T>,
@@ -48,7 +33,7 @@ async function withTimeout<T>(
 
 export async function runNuqWorker(options: {
   serviceName: string;
-  queue: WorkerQueue;
+  queue: NuQ<ScrapeJobData>;
   healthCheck: () => Promise<boolean>;
   metrics?: () => string | Promise<string>;
   beforeStart?: () => void | Promise<void>;
@@ -115,89 +100,27 @@ export async function runNuqWorker(options: {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  let noJobTimeout = 1500;
-
-  while (!isShuttingDown) {
-    const job = await options.queue.getJobToProcess();
-
-    if (job === null) {
-      _logger.info("No jobs to process", { module: "nuq/metrics" });
-      await new Promise(resolve => setTimeout(resolve, noJobTimeout));
-      if (!config.NUQ_RABBITMQ_URL) {
-        noJobTimeout = Math.min(noJobTimeout * 2, 10000);
-      }
-      continue;
-    }
-
-    noJobTimeout = 500;
-
-    const logger = _logger.child({
-      module: options.serviceName,
+  // Deployments.ai: the claim/renew/settle loop is shared with the other
+  // NuQ consumers (nuq/consumer.ts).
+  // Jobs are processed one at a time, so one pending timer suffices.
+  let endJobTimer: ((labels: { status: string }) => number) | undefined;
+  await consumeJobs({
+    queue: options.queue,
+    logger: _logger.child({ module: options.serviceName }),
+    isShuttingDown: () => isShuttingDown,
+    jobLogFields: job => ({
       scrapeId: job.id,
       zeroDataRetention: job.data?.zeroDataRetention ?? false,
-    });
-
-    logger.info("Acquired job");
-
-    const lockRenewInterval = setInterval(async () => {
-      try {
-        logger.info("Renewing lock");
-        if (!(await options.queue.renewLock(job.id, job.lock!, logger))) {
-          logger.warn("Failed to renew lock");
-          clearInterval(lockRenewInterval);
-          return;
-        }
-        logger.info("Renewed lock");
-      } catch (error) {
-        logger.warn("Failed to renew lock", { error });
-        clearInterval(lockRenewInterval);
-      }
-    }, 15000);
-
-    let processResult:
-      | { ok: true; data: Awaited<ReturnType<typeof processJobInternal>> }
-      | { ok: false; error: any };
-
-    const endJobTimer = jobDurationSeconds.startTimer({ type: job.data.mode });
-
-    try {
-      processResult = { ok: true, data: await processJobInternal(job) };
-    } catch (error) {
-      processResult = { ok: false, error };
-    }
-
-    clearInterval(lockRenewInterval);
-
-    if (processResult.ok) {
-      endJobTimer({ status: "success" });
-      if (
-        !(await options.queue.jobFinish(
-          job.id,
-          job.lock!,
-          processResult.data,
-          logger,
-        ))
-      ) {
-        logger.warn("Could not update job status");
-      }
-    } else {
-      endJobTimer({ status: "failed" });
-      if (
-        !(await options.queue.jobFail(
-          job.id,
-          job.lock!,
-          processResult.error instanceof Error
-            ? processResult.error.message
-            : typeof processResult.error === "string"
-              ? processResult.error
-              : JSON.stringify(processResult.error),
-          logger,
-        ))
-      ) {
-        logger.warn("Could not update job status");
-      }
-    }
-  }
+    }),
+    process: async job => {
+      endJobTimer = jobDurationSeconds.startTimer({ type: job.data.mode });
+      return processJobInternal(job);
+    },
+    onOutcome: (_job, ok) => {
+      endJobTimer?.({ status: ok ? "success" : "failed" });
+      endJobTimer = undefined;
+    },
+  });
 
   _logger.info("NuQ worker shutting down", { module: options.serviceName });
 

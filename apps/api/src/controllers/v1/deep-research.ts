@@ -1,7 +1,7 @@
 import { v7 as uuidv7 } from "uuid";
 import { Request, Response } from "express";
 import { ErrorResponse, extractOptions, RequestWithAuth } from "./types";
-import { getDeepResearchQueue } from "../../services/queue-service";
+import { deepResearchQueue } from "../../services/worker/nuq";
 import * as Sentry from "@sentry/node";
 import { saveDeepResearch } from "../../lib/deep-research/deep-research-redis";
 import { z } from "zod";
@@ -63,7 +63,7 @@ const deepResearchRequestSchema = z
     query: data.topic || data.query, // Use topic as query if provided
   }));
 
-type DeepResearchRequest = z.infer<typeof deepResearchRequestSchema>;
+export type DeepResearchRequest = z.infer<typeof deepResearchRequestSchema>;
 
 type DeepResearchResponse =
   | ErrorResponse
@@ -127,8 +127,8 @@ export async function deepResearchController(
     summaries: [],
   });
 
-  await getDeepResearchQueue().add(researchId, jobData, {
-    jobId: researchId,
+  await deepResearchQueue.addJob(researchId, jobData, {
+    ownerId: req.auth.team_id,
   });
 
   return res.status(200).json({

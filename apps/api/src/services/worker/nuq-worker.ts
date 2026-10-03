@@ -1,7 +1,7 @@
 import "dotenv/config";
 import "../sentry";
 import { setSentryServiceTag } from "../sentry";
-import { nuqGetLocalMetrics, nuqHealthCheck, scrapeQueue } from "./nuq";
+import { nuqHealthCheck, nuqShutdown, scrapeQueue } from "./nuq";
 import { runNuqWorker } from "./nuq-worker-runner";
 
 (async () => {
@@ -11,7 +11,6 @@ import { runNuqWorker } from "./nuq-worker-runner";
     serviceName: "nuq-worker",
     queue: scrapeQueue,
     healthCheck: nuqHealthCheck,
-    metrics: nuqGetLocalMetrics,
-    shutdown: () => scrapeQueue.shutdown(),
+    shutdown: nuqShutdown,
   });
 })();

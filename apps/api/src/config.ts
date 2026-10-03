@@ -109,39 +109,20 @@ const configSchema = z.object({
     .default("https://www.firecrawl.dev/.well-known/oauth-protected-resource"),
 
   // Database & Storage
-  POSTGRES_HOST: z.string().default("localhost"),
-  POSTGRES_PORT: z.string().default("5432"),
-  POSTGRES_DB: z.string().default("postgres"),
-  POSTGRES_USER: z.string().default("postgres"),
-  POSTGRES_PASSWORD: z.string().default("postgres"),
   DATABASE_URL: z.string().optional(),
   DATABASE_REPLICA_URL: z.string().optional(),
   INDEX_DATABASE_URL: z.string().optional(),
-  INDEX_CACHE_REDIS_URL: z.string().optional(),
+  // (Deployments.ai: the Redis index cache was removed with Redis.)
   // Negative (miss) caching TTL for index URL->id lookups, in ms. 0 disables
   // it; the cache then only shields lookups that find data. A positive value
   // (e.g. 600000 = 10min) also short-circuits repeat lookups for URLs with no
   // index entry. Kept short so any missed cache-clear self-heals quickly.
   INDEX_CACHE_NEGATIVE_TTL_MS: z.coerce.number().default(0),
-  REDIS_URL: z.string().optional(),
-  REDIS_EVICT_URL: z.string().optional(),
-  REDIS_RATE_LIMIT_URL: z.string().optional(),
-  NUQ_DATABASE_URL: z.string().optional(),
-  NUQ_DATABASE_URL_LISTEN: z.string().optional(),
-  NUQ_RABBITMQ_URL: z.string().optional(),
-  FDB_CLUSTER_FILE: emptyStringAsUndefined(z.string()),
-  NUQ_BACKEND: emptyStringAsUndefined(z.enum(["pg", "fdb"])),
-  NUQ_FDB_READY_SHARDS: emptyStringAsDefault(
-    z.coerce.number().int().positive().default(2048),
-  ),
-  // 1 = strict (priority, FIFO) promotion order per team; raise for teams with
-  // extreme finish rates at the cost of approximate cross-shard ordering
-  NUQ_FDB_TEAM_PENDING_SHARDS: emptyStringAsDefault(
-    z.coerce.number().int().positive().default(1),
-  ),
-  NUQ_FDB_TIME_BUCKETS: emptyStringAsDefault(
-    z.coerce.number().int().positive().default(16),
-  ),
+  // Deployments.ai: queue and crawl/extract/research state live in one
+  // DynamoDB table (src/services/dynamo/README.md). The endpoint override is
+  // for DynamoDB Local; production uses the regional endpoint and task role.
+  FIRECRAWL_DYNAMODB_TABLE: z.string().optional(),
+  FIRECRAWL_DYNAMODB_ENDPOINT: emptyStringAsUndefined(z.url()),
 
   // Google Cloud Storage
   GCS_BUCKET_NAME: z.string().optional(),
@@ -207,11 +188,10 @@ const configSchema = z.object({
   NUQ_WORKER_PORT: z.coerce.number().default(3000).catch(3000), // todo: investigate why .catch is needed
   NUQ_WORKER_START_PORT: z.coerce.number().default(3006),
   NUQ_WORKER_COUNT: z.coerce.number().default(5),
-  NUQ_PREFETCH_WORKER_PORT: z.coerce.number().default(3011).catch(3011), // todo: investigate why .catch is needed
-  NUQ_RECONCILER_WORKER_PORT: z.coerce.number().default(3012).catch(3012),
-  CCLOG_WORKER_PORT: z.coerce.number().default(3013).catch(3013),
+  // Deployments.ai: the NuQ sweeper replaces the prefetch and reconciler workers.
+  NUQ_SWEEPER_WORKER_PORT: z.coerce.number().default(3011).catch(3011),
+  NUQ_SWEEPER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   EXTRACT_WORKER_PORT: z.coerce.number().default(3004),
-  NUQ_WAIT_MODE: z.string().optional(),
 
   // Harness Configuration
   HARNESS_STARTUP_TIMEOUT_MS: z.coerce.number().default(60000),
@@ -377,8 +357,6 @@ const configSchema = z.object({
   // PII Redaction (fire-privacy)
   FIRE_PRIVACY_URL: z.string().optional(),
   FIRE_PRIVACY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-
-  NUQ_PREFETCH_WORKER_HEARTBEAT_URL: z.string().optional(),
 
   ZDRCLEANER_HEARTBEAT_URL: z.string().optional(),
 
