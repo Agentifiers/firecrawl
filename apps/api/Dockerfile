@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# Build context: third_party/firecrawl (see MODIFICATIONS.md).
 FROM node:22-slim AS base
 
 ENV PNPM_HOME="/pnpm"
@@ -10,7 +11,7 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 # Build Go shared library
 FROM golang:1.24 AS go-build
 WORKDIR /app
-COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
+COPY apps/api/sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
 
 RUN cd sharedLibs/go-html-to-md && \
     go mod download && \
@@ -47,9 +48,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no
 # Copy dependency inputs. The native workspace is included here because its
 # install script builds the Rust package; API TypeScript source is copied after
 # dependency install so source-only changes do not invalidate this layer.
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
-COPY patches ./patches
-COPY native ./native
+COPY apps/api/pnpm-lock.yaml apps/api/pnpm-workspace.yaml apps/api/package.json ./
+COPY apps/api/patches ./patches
+COPY apps/api/native ./native
 
 # Install dependencies
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
@@ -57,7 +58,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     --mount=type=cache,target=/app/native/target \
     pnpm install --frozen-lockfile
 
-COPY . .
+COPY apps/api ./
 
 # Build the application from a clean output directory.
 RUN rm -rf dist && pnpm run build
@@ -97,6 +98,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/native ./native
 COPY --from=build /app/BUILD_SHA ./BUILD_SHA
+COPY LICENSE NOTICE MODIFICATIONS.md ./
 
 # Copy Go shared library
 COPY --from=go-build /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so ./sharedLibs/go-html-to-md/

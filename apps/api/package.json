@@ -31,8 +31,6 @@
     "nuq-prefetch-worker:production": "node dist/src/services/worker/nuq-prefetch-worker.js",
     "nuq-reconciler-worker": "tsc-watch --compiler ./node_modules/typescript-7/bin/tsc --onSuccess \"node dist/src/services/worker/nuq-reconciler-worker.js\"",
     "nuq-reconciler-worker:production": "node dist/src/services/worker/nuq-reconciler-worker.js",
-    "cclog-worker": "tsc-watch --compiler ./node_modules/typescript-7/bin/tsc --onSuccess \"node dist/src/services/cclog-worker.js\"",
-    "cclog-worker:production": "node dist/src/services/cclog-worker.js",
     "extract-worker": "tsc-watch --compiler ./node_modules/typescript-7/bin/tsc --onSuccess \"node dist/src/services/extract-worker.js\"",
     "extract-worker:production": "node dist/src/services/extract-worker.js",
     "index-worker": "tsc-watch --compiler ./node_modules/typescript-7/bin/tsc --onSuccess \"node dist/src/services/indexing/index-worker.js\"",
@@ -41,9 +39,7 @@
     "zdr-worker:production": "node dist/src/services/zdr-worker.js",
     "mongo-docker": "docker run -d -p 2717:27017 -v ./mongo-data:/data/db --name mongodb mongo:latest",
     "mongo-docker-console": "docker exec -it mongodb mongosh",
-    "sentry:sourcemaps": "sentry-cli sourcemaps inject --org caleb-peffer --project firecrawl-scraper-js ./dist && sentry-cli sourcemaps upload --org caleb-peffer --project firecrawl-scraper-js ./dist",
-    "prepare": "cd ../.. && husky ./apps/api/.husky",
-    "knip": "knip"
+    "sentry:sourcemaps": "sentry-cli sourcemaps inject --org caleb-peffer --project firecrawl-scraper-js ./dist && sentry-cli sourcemaps upload --org caleb-peffer --project firecrawl-scraper-js ./dist"
   },
   "author": "",
   "license": "ISC",
