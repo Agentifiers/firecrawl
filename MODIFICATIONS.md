@@ -180,3 +180,11 @@ Dropped features (hosted-only or dependent on removed Redis/RabbitMQ state):
   extract consumer (`prefetch(1)`) ran one job at a time.
 - `src/services/worker/nuq/queue.test.ts`: two consumers of eight loops each
   process 60 jobs exactly once and leave every job completed.
+
+### 2026-10-02 — local table bootstrap
+
+- Added `src/services/dynamo/create-table.ts`, a command that creates the
+  table described by `table-schema.ts` at `FIRECRAWL_DYNAMODB_ENDPOINT` under
+  `FIRECRAWL_DYNAMODB_TABLE`. The repository's local Compose stack runs it
+  against DynamoDB Local before starting the API; it refuses to run without an
+  endpoint override because AWS tables are created by Terraform.
