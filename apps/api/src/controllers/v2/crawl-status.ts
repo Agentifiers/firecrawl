@@ -1,3 +1,5 @@
+// Deployments.ai modification: queue reads go to the DynamoDB NuQ and the
+// robots.txt warning reads the crawl store instead of Redis.
 import { Response } from "express";
 import { config } from "../../config";
 import {
@@ -15,6 +17,7 @@ import {
   getDoneJobsOrderedUntil,
   getLastDoneJobTimestamp,
   isCrawlKickoffFinished,
+  getRobotsBlocked,
 } from "../../lib/crawl-redis";
 import {
   supabaseGetScrapeById,
@@ -29,9 +32,8 @@ import {
   NuQJob,
   NuQJobStatus,
   crawlGroup,
-} from "../../services/worker/nuq-router";
+} from "../../services/worker/nuq";
 import { ScrapeJobSingleUrls } from "../../types";
-import { redisEvictConnection } from "../../../src/services/redis";
 import { isBaseDomain, extractBaseDomain } from "../../lib/url-utils";
 configDotenv();
 
@@ -333,9 +335,7 @@ export async function crawlStatusController(
   // Check for robots.txt blocked URLs and add warning if found
   let warning: string | undefined;
   try {
-    const robotsBlocked = await redisEvictConnection.smembers(
-      "crawl:" + req.params.jobId + ":robots_blocked",
-    );
+    const robotsBlocked = await getRobotsBlocked(req.params.jobId);
     const rbCount = robotsBlocked?.length ?? 0;
     // Emit as separate simple logs so no meta is lost in sinks
     const statusNow = outputBulkA.status ?? "scraping";

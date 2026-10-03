@@ -9,26 +9,15 @@ import {
   normalizeURLForIndex,
   saveIndexToGCS,
   generateURLSplits,
-  addIndexInsertJob,
   generateDomainSplits,
-  addOMCEJob,
 } from "../../../../services";
-import { queryMaxAge, indexGetRecent5 } from "../../../../db/rpc";
+import { dbIndex } from "../../../../db/connection";
+import * as schema from "../../../../db/schema";
 import {
-  deleteCachedIndexEntry,
-  deriveIndexVariantKey,
-  filterIndexEntries,
-  getCachedIndexEntries,
-  getCachedMaxAge,
-  getCachedNegative,
-  isNegativeStillValid,
-  setCachedMaxAge,
-  setCachedNegative,
-  upsertCachedIndexEntries,
-  useIndexCache,
-  useIndexNegativeCache,
-  type IndexCacheEntry,
-} from "../../../../services/index-cache";
+  insertOmceJobIfNeeded,
+  queryMaxAge,
+  indexGetRecent5,
+} from "../../../../db/rpc";
 import { indexLookupCounter } from "../../../../lib/index-cache-metrics";
 import {
   AgentIndexOnlyError,
@@ -157,8 +146,10 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
         description = null;
       }
 
+      // Deployments.ai: upstream pushed this row onto a Redis list drained by
+      // the hosted index worker; it is now inserted into the index DB directly.
       try {
-        await addIndexInsertJob({
+        await dbIndex.insert(schema.index).values({
           id: indexId,
           url: normalizedURL,
           url_hash: urlHash,
@@ -200,19 +191,19 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
           ...(description ? { description } : {}),
         });
       } catch (error) {
-        meta.logger.error("Failed to add document to index insert queue", {
+        meta.logger.error("Failed to insert document into index", {
           error,
         });
       }
 
       if (domainSplits.length > 0) {
         try {
-          await addOMCEJob([
+          await insertOmceJobIfNeeded(
             domainSplits.length - 1,
             domainSplitsHash.slice(-1)[0],
-          ]);
+          );
         } catch (error) {
-          meta.logger.warn("Failed to add domain to OMCE job queue", {
+          meta.logger.warn("Failed to insert OMCE job", {
             error,
           });
         }
@@ -238,7 +229,7 @@ export async function scrapeURLWithIndex(
 
   const defaultMaxAge = 2 * 24 * 60 * 60 * 1000; // 2 days
 
-  type MaxAgeSource = "explicit" | "dynamic_cached" | "dynamic_db" | "default";
+  type MaxAgeSource = "explicit" | "dynamic_db" | "default";
   let maxAge: number;
   let maxAgeSource: MaxAgeSource = "default";
   if (meta.options.maxAge !== undefined) {
@@ -264,22 +255,11 @@ export async function scrapeURLWithIndex(
             source: MaxAgeSource;
           }> => {
             try {
-              const domainHash = domainSplitsHash[level];
-              if (useIndexCache) {
-                const cached = await getCachedMaxAge(domainHash, meta.logger);
-                if (cached !== null) {
-                  return {
-                    value: cached.maxAge ?? defaultMaxAge,
-                    source: "dynamic_cached",
-                  };
-                }
-              }
-              const data = await queryMaxAge(domainHash);
+              // Deployments.ai: the Dragonfly index cache (index-cache.ts) is
+              // removed; max age and index rows always come from the index DB.
+              const data = await queryMaxAge(domainSplitsHash[level]);
               const value =
                 !data || data.length === 0 ? null : (data[0].max_age ?? null);
-              if (useIndexCache) {
-                setCachedMaxAge(domainHash, value, meta.logger).catch(() => {});
-              }
               return { value: value ?? defaultMaxAge, source: "dynamic_db" };
             } catch (error) {
               meta.logger.warn("Failed to get max age from DB", { error });
@@ -305,57 +285,29 @@ export async function scrapeURLWithIndex(
 
   const checkpoint1 = Date.now();
 
-  const variantKey = deriveIndexVariantKey({
-    urlHash,
-    isMobile: meta.options.mobile,
-    blockAds: meta.options.blockAds,
-    isStealth: meta.featureFlags.has("stealthProxy"),
-    locationCountry: meta.options.location?.country ?? null,
-    locationLanguages:
-      (meta.options.location?.languages?.length ?? 0) > 0
-        ? (meta.options.location?.languages ?? null)
-        : null,
-  });
-
-  let cacheStatus: "hit" | "filtered" | "miss" | "error" | "disabled" =
-    "disabled";
-  let servedFromCache = false;
-  let negativeHit = false;
-  let timingsCache = 0;
   let timingsDb = 0;
 
   // Canonical log for every index URL->id lookup. debug = normal op, warn =
-  // recovered weird op (cache failure with DB fallback, GCS self-heal),
-  // error = failed op.
+  // recovered weird op (GCS self-heal), error = failed op.
   const logLookup = (
     level: "debug" | "warn" | "error",
     dbResult: "hit" | "miss" | "error",
     extra: Record<string, unknown> = {},
   ) => {
-    const outcome = negativeHit
-      ? "cache_neg_hit"
-      : cacheStatus === "hit"
-        ? "cache_hit"
-        : cacheStatus === "disabled"
-          ? `db_only_${dbResult}`
-          : `cache_${cacheStatus}_db_${dbResult}`;
+    const outcome = `db_only_${dbResult}`;
     indexLookupCounter.inc({ outcome });
-    const effectiveLevel =
-      level === "debug" && cacheStatus === "error" ? "warn" : level;
-    meta.logger[effectiveLevel]("Index URL lookup", {
+    meta.logger[level]("Index URL lookup", {
       module: "index",
       method: "scrapeURLWithIndex",
       canonicalLog: "index/url_lookup",
       outcome,
       urlHash: urlHash.toString("hex"),
-      variantKey,
       teamId: meta.internalOptions.teamId,
       scrapeId: meta.id,
       maxAge,
       maxAgeSource,
       minAge: meta.options.minAge ?? null,
       timingsMaxAge: checkpoint1 - startTime,
-      timingsCache,
       timingsDb,
       timingsFull: Date.now() - startTime,
       ...extra,
@@ -364,108 +316,33 @@ export async function scrapeURLWithIndex(
 
   let data: { id: string; created_at: string; status: number }[] = [];
 
-  if (useIndexCache) {
-    const cacheStart = Date.now();
-    const read = await getCachedIndexEntries(variantKey, meta.logger);
-    timingsCache = Date.now() - cacheStart;
-    if (read.status === "hit") {
-      const filtered = filterIndexEntries(read.entries, {
-        maxAgeMs: maxAge,
-        minAgeMs: meta.options.minAge ?? null,
-        needsScreenshot: meta.featureFlags.has("screenshot"),
-        needsScreenshotFullscreen: meta.featureFlags.has(
-          "screenshot@fullScreen",
-        ),
-        waitTimeMs: meta.options.waitFor,
-      });
-      if (filtered.length > 0) {
-        data = filtered;
-        servedFromCache = true;
-        cacheStatus = "hit";
-      } else {
-        // The capped per-key entry list may have dropped rows the DB still
-        // has, so an empty filter result must fall through to the DB.
-        cacheStatus = "filtered";
-      }
-    } else {
-      cacheStatus = read.status;
-    }
-  }
-
-  // Negative cache: on a clean positive miss (key absent), a still-valid
-  // negative marker proves there's no index entry for this window, so we can
-  // skip Postgres. Not consulted on "filtered"/"error" (entries exist, or the
-  // cache is unhealthy and we must fall back to the DB), nor for minAge
-  // requests (different no-data semantics — NoCachedDataError, no waterfall).
-  if (
-    !servedFromCache &&
-    useIndexNegativeCache &&
-    cacheStatus === "miss" &&
-    meta.options.minAge === undefined
-  ) {
-    const negStart = Date.now();
-    const neg = await getCachedNegative(variantKey, meta.logger);
-    timingsCache += Date.now() - negStart;
-    if (
-      neg !== null &&
-      isNegativeStillValid(neg.emptyFrom, maxAge, Date.now())
-    ) {
-      negativeHit = true;
-    }
-  }
-
-  if (!servedFromCache && !negativeHit) {
-    const dbStart = Date.now();
-    try {
-      const rows = await indexGetRecent5({
-        url_hash: urlHash,
-        max_age_ms: maxAge,
-        is_mobile: meta.options.mobile,
-        block_ads: meta.options.blockAds,
-        feature_screenshot: meta.featureFlags.has("screenshot"),
-        feature_screenshot_fullscreen: meta.featureFlags.has(
-          "screenshot@fullScreen",
-        ),
-        location_country: meta.options.location?.country ?? null,
-        location_languages:
-          (meta.options.location?.languages?.length ?? 0) > 0
-            ? (meta.options.location?.languages ?? null)
-            : null,
-        wait_time_ms: meta.options.waitFor,
-        is_stealth: meta.featureFlags.has("stealthProxy"),
-        min_age_ms: meta.options.minAge ?? null,
-      });
-      timingsDb = Date.now() - dbStart;
-      if (useIndexCache && rows.length > 0) {
-        const entries: IndexCacheEntry[] = rows.map(row => ({
-          id: row.id,
-          created_at: row.created_at,
-          status: row.status,
-          has_screenshot: row.has_screenshot,
-          has_screenshot_fullscreen: row.has_screenshot_fullscreen,
-          wait_time_ms: row.wait_time_ms,
-        }));
-        upsertCachedIndexEntries(variantKey, entries, meta.logger).catch(
-          () => {},
-        );
-      } else if (
-        useIndexNegativeCache &&
-        rows.length === 0 &&
-        meta.options.minAge === undefined
-      ) {
-        // Confirmed empty for [dbStart - maxAge, dbStart]; record the left edge.
-        setCachedNegative(variantKey, dbStart - maxAge, meta.logger).catch(
-          () => {},
-        );
-      }
-      data = rows;
-    } catch (error) {
-      timingsDb = Date.now() - dbStart;
-      logLookup("error", "error", { error });
-      throw new EngineError("Failed to retrieve URL from DB index", {
-        cause: error,
-      });
-    }
+  const dbStart = Date.now();
+  try {
+    data = await indexGetRecent5({
+      url_hash: urlHash,
+      max_age_ms: maxAge,
+      is_mobile: meta.options.mobile,
+      block_ads: meta.options.blockAds,
+      feature_screenshot: meta.featureFlags.has("screenshot"),
+      feature_screenshot_fullscreen: meta.featureFlags.has(
+        "screenshot@fullScreen",
+      ),
+      location_country: meta.options.location?.country ?? null,
+      location_languages:
+        (meta.options.location?.languages?.length ?? 0) > 0
+          ? (meta.options.location?.languages ?? null)
+          : null,
+      wait_time_ms: meta.options.waitFor,
+      is_stealth: meta.featureFlags.has("stealthProxy"),
+      min_age_ms: meta.options.minAge ?? null,
+    });
+    timingsDb = Date.now() - dbStart;
+  } catch (error) {
+    timingsDb = Date.now() - dbStart;
+    logLookup("error", "error", { error });
+    throw new EngineError("Failed to retrieve URL from DB index", {
+      cause: error,
+    });
   }
 
   let selectedRow: {
@@ -511,11 +388,6 @@ export async function scrapeURLWithIndex(
     { indexCreatedAt: selectedRow.created_at },
   );
   if (!doc) {
-    if (servedFromCache) {
-      // Self-heal: drop the poisoned cache entry so it can't keep serving an
-      // id whose document is gone.
-      deleteCachedIndexEntry(variantKey, id, meta.logger).catch(() => {});
-    }
     logLookup("warn", "hit", { gcsMiss: true, indexDocumentId: id });
     throw new EngineError("Document not found in GCS");
   }

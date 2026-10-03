@@ -1,5 +1,8 @@
-import { redisEvictConnection } from "../../services/redis";
+// Deployments.ai modification: deep research status is stored in DynamoDB
+// (`deep-research#<id>`, sk `status`, 6h) instead of Redis; see
+// ../status-document.ts. Module name and API are upstream's.
 import { logger as _logger } from "../logger";
+import { statusDocumentStore } from "../status-document";
 
 export type DeepResearchActivity = {
   type:
@@ -47,66 +50,46 @@ export type StoredDeepResearch = {
 // TTL of 6 hours
 const DEEP_RESEARCH_TTL = 6 * 60 * 60;
 
+const research = statusDocumentStore<StoredDeepResearch>(
+  "deep-research",
+  "status",
+  DEEP_RESEARCH_TTL,
+);
+
 export async function saveDeepResearch(
   id: string,
-  research: StoredDeepResearch,
+  doc: StoredDeepResearch,
 ) {
-  _logger.debug("Saving deep research " + id + " to Redis...");
-  await redisEvictConnection.set(
-    "deep-research:" + id,
-    JSON.stringify(research),
-    "EX",
-    DEEP_RESEARCH_TTL,
-  );
+  _logger.debug("Saving deep research " + id + "...");
+  await research.save(id, doc);
 }
 
 export async function getDeepResearch(
   id: string,
 ): Promise<StoredDeepResearch | null> {
-  const x = await redisEvictConnection.get("deep-research:" + id);
-  return x ? JSON.parse(x) : null;
+  return research.get(id);
 }
 
 export async function updateDeepResearch(
   id: string,
-  research: Partial<StoredDeepResearch>,
+  patch: Partial<StoredDeepResearch>,
 ) {
-  const current = await getDeepResearch(id);
-  if (!current) return;
-
-  const updatedResearch = {
+  await research.update(id, current => ({
     ...current,
-    ...research,
-    // Append new activities if provided
-    activities: research.activities
-      ? [...(current.activities || []), ...research.activities]
+    ...patch,
+    // Append new activities, sources, and summaries if provided
+    activities: patch.activities
+      ? [...(current.activities || []), ...patch.activities]
       : current.activities,
-    // Append new findings if provided
-    // findings: research.findings
-    //   ? [...(current.findings || []), ...research.findings]
-    //   : current.findings,
-    // Append new sources if provided
-    sources: research.sources
-      ? [...(current.sources || []), ...research.sources]
+    sources: patch.sources
+      ? [...(current.sources || []), ...patch.sources]
       : current.sources,
-    // Append new summaries if provided
-    summaries: research.summaries
-      ? [...(current.summaries || []), ...research.summaries]
+    summaries: patch.summaries
+      ? [...(current.summaries || []), ...patch.summaries]
       : current.summaries,
-  };
-
-  await redisEvictConnection.set(
-    "deep-research:" + id,
-    JSON.stringify(updatedResearch),
-    "EX",
-    DEEP_RESEARCH_TTL,
-  );
+  }));
 }
 
 export async function getDeepResearchExpiry(id: string): Promise<Date> {
-  const d = new Date();
-  const ttl = await redisEvictConnection.pttl("deep-research:" + id);
-  d.setMilliseconds(d.getMilliseconds() + ttl);
-  d.setMilliseconds(0);
-  return d;
+  return research.expiry(id);
 }

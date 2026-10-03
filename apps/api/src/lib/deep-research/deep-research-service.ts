@@ -15,10 +15,12 @@ export interface DeepResearchServiceOptions {
   maxDepth: number;
   maxUrls: number;
   timeLimit: number;
-  analysisPrompt: string;
-  systemPrompt: string;
+  // Deployments.ai modification: typed as the request schema delivers them
+  // (upstream's BullMQ job data was untyped).
+  analysisPrompt?: string;
+  systemPrompt?: string;
   formats: string[];
-  jsonOptions: ExtractOptions;
+  jsonOptions?: ExtractOptions;
   apiKeyId: number | null;
 }
 

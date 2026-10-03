@@ -10,16 +10,8 @@ import type {
   WebhookConfig,
   WebhookEvent,
   WebhookEventDataMap,
-  WebhookQueueMessage,
 } from "./types";
-import { redisEvictConnection } from "../redis";
-import { db } from "../../db/connection";
-import * as schema from "../../db/schema";
-import { webhookQueue } from "./queue";
 import { randomUUID } from "crypto";
-
-const WEBHOOK_INSERT_QUEUE_KEY = "webhook-insert-queue";
-const WEBHOOK_INSERT_BATCH_SIZE = 1000;
 
 type WebhookSendResult = {
   attempted: boolean;
@@ -96,10 +88,11 @@ export class WebhookSender {
     }
 
     delivery.catch(() => {});
+    // Deployments.ai: the RabbitMQ webhook queue is removed; delivery is always direct.
     return {
       attempted: true,
       delivered: false,
-      queued: this.usesWebhookQueue(),
+      queued: false,
     };
   }
 
@@ -109,10 +102,6 @@ export class WebhookSender {
     }
 
     return webhookEventMatchesFilter(this.config.events, event);
-  }
-
-  private usesWebhookQueue(): boolean {
-    return Boolean(config.WEBHOOK_USE_RABBITMQ && config.NUQ_RABBITMQ_URL);
   }
 
   private async deliver(
@@ -125,35 +114,6 @@ export class WebhookSender {
         webhookUrl: this.config.url,
       });
       return { delivered: false, skipped: true };
-    }
-
-    if (this.usesWebhookQueue()) {
-      const queueMessage: WebhookQueueMessage = {
-        webhook_url: this.config.url,
-        payload,
-        headers: this.config.headers,
-        team_id: this.context.teamId,
-        job_id: this.context.jobId,
-        scrape_id: scrapeId ?? null,
-        event: payload.type,
-        timeout_ms: this.context.v0 ? 30000 : 10000,
-      };
-
-      try {
-        await webhookQueue.publish(queueMessage);
-        this.logger.info("Webhook queued for delivery", {
-          webhookUrl: this.config.url,
-          event: payload.type,
-        });
-      } catch (error) {
-        this.logger.error("Failed to queue webhook", {
-          error,
-          webhookUrl: this.config.url,
-        });
-        throw error;
-      }
-
-      return { delivered: false, queued: true };
     }
 
     const payloadString = JSON.stringify(payload);
@@ -237,36 +197,8 @@ export class WebhookSender {
   }
 }
 
-export async function getWebhookInsertQueueLength(): Promise<number> {
-  return (await redisEvictConnection.llen(WEBHOOK_INSERT_QUEUE_KEY)) ?? 0;
-}
-
-export async function processWebhookInsertJobs() {
-  const jobs =
-    (await redisEvictConnection.lpop(
-      WEBHOOK_INSERT_QUEUE_KEY,
-      WEBHOOK_INSERT_BATCH_SIZE,
-    )) ?? [];
-  if (jobs.length === 0) return;
-
-  const parsedJobs = jobs.map(x => JSON.parse(x));
-  _logger.info("Webhook inserter found jobs to insert", {
-    jobCount: parsedJobs.length,
-  });
-
-  try {
-    await db.insert(schema.webhook_logs).values(parsedJobs);
-    _logger.info("Webhook inserter inserted jobs", {
-      jobCount: parsedJobs.length,
-    });
-  } catch (error) {
-    _logger.error("Webhook inserter failed to insert jobs", {
-      error,
-      jobCount: parsedJobs.length,
-    });
-  }
-}
-
+// Deployments.ai: upstream buffered webhook_logs rows in a Redis list drained by
+// the hosted index worker into Postgres. Self-host keeps only the structured log.
 async function logWebhook(data: {
   success: boolean;
   error?: string;
@@ -277,24 +209,15 @@ async function logWebhook(data: {
   statusCode?: number;
   event: WebhookEvent;
 }): Promise<void> {
-  try {
-    await redisEvictConnection.rpush(
-      WEBHOOK_INSERT_QUEUE_KEY,
-      JSON.stringify({
-        success: data.success,
-        error: data.error ?? null,
-        team_id: data.teamId,
-        crawl_id: data.crawlId,
-        scrape_id: data.scrapeId ?? null,
-        url: data.url,
-        status_code: data.statusCode ?? null,
-        event: data.event,
-      }),
-    );
-  } catch (error) {
-    logger.error("Error logging webhook", {
-      error,
-      teamId: data.teamId,
-    });
-  }
+  logger.info("Webhook delivery attempted", {
+    module: "webhook-sender",
+    success: data.success,
+    error: data.error,
+    teamId: data.teamId,
+    crawlId: data.crawlId,
+    scrapeId: data.scrapeId,
+    webhookUrl: data.url,
+    statusCode: data.statusCode,
+    event: data.event,
+  });
 }

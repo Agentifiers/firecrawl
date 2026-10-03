@@ -4,10 +4,8 @@
 // that replace BullMQ (deep research, llms.txt) and RabbitMQ (extract).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { DeepResearchRequest } from "../../controllers/v1/deep-research";
-import type {
-  ExtractRequest,
-  GenerateLLMsTextRequest,
-} from "../../controllers/v1/types";
+import type { GenerateLLMsTextRequest } from "../../controllers/v1/types";
+import type { ExtractRequest } from "../../controllers/v2/types";
 import { logger } from "../../lib/logger";
 import { type ScrapeJobData } from "../../types";
 import { dynamo, tableName } from "../dynamo/client";
@@ -24,6 +22,7 @@ export { NuQ, STALL_TIMEOUT_MS } from "./nuq/queue";
 export type { NuQJobOptions } from "./nuq/queue";
 export { crawlGroup } from "./nuq/groups";
 
+/** Both API versions enqueue the v2 request shape the extractor consumes. */
 export type ExtractJobData = {
   extractId: string;
   request: ExtractRequest;

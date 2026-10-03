@@ -6,33 +6,31 @@ import http from "http";
 import https from "https";
 
 import { logger as _logger } from "../../lib/logger";
-import {
-  concurrentJobDone,
-  pushConcurrencyLimitActiveJob,
-} from "../../lib/concurrency-limit";
-import { addJobPriority, deleteJobPriority } from "../../lib/job-priority";
 import { cacheableLookup } from "../../scraper/scrapeURL/lib/cacheableLookup";
 import { v7 as uuidv7 } from "uuid";
 import {
   addCrawlJob,
   addCrawlJobs,
   addCrawlJobDone,
+  addCrawlSitemapJob,
+  addCrawlSitemapJobDone,
+  addVisitedURLs,
   crawlToCrawler,
   recordRobotsBlocked,
   recordThreatBlocked,
   finishCrawlKickoff,
-  generateURLPermutations,
   getCrawl,
+  lockCrawlSitemap,
   lockURL,
   lockURLsIndividually,
-  normalizeURL,
+  releaseFailedCrawlJob,
   saveCrawl,
   setCrawlError,
   StoredCrawl,
 } from "../../lib/crawl-redis";
+import { generateURLPermutations, normalizeURL } from "../../lib/crawl-urls";
 import { checkUrlsAgainstThreatPolicy } from "../../lib/threat-protection/request";
 import type { ThreatDecision } from "../../lib/threat-protection/types";
-import { redisEvictConnection } from "../redis";
 import {
   resolveBillingMetadata,
   toAutumnBillingProperties,
@@ -48,7 +46,6 @@ import {
   addScrapeJobs,
 } from "../queue-jobs";
 import psl from "psl";
-import { getJobPriority } from "../../lib/job-priority";
 import { Document, scrapeOptions, TeamFlags } from "../../controllers/v2/types";
 import { hasFormatOfType } from "../../lib/format-utils";
 import { getACUCTeam } from "../../controllers/auth";
@@ -56,7 +53,6 @@ import { createWebhookSender, WebhookEvent } from "../webhook/index";
 import { CustomError } from "../../lib/custom-error";
 import { startWebScraperPipeline } from "../../main/runWebScraper";
 import { CostTracking } from "../../lib/cost-tracking";
-import { chargeKeylessCredits } from "../../lib/keyless";
 import { normalizeUrlOnlyHostname } from "../../lib/canonical-url";
 import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 import { UNSUPPORTED_SITE_MESSAGE } from "../../lib/strings";
@@ -67,7 +63,7 @@ import {
   calculateThreatScanCredits,
 } from "../../lib/scrape-billing";
 import { billTeam } from "../billing/credit_billing";
-import { getBillingQueue } from "../queue-service";
+import { queueBillingOperation } from "../billing/batch_billing";
 import type { Logger } from "winston";
 import {
   CrawlDenialError,
@@ -96,19 +92,12 @@ import { ScrapeUrlResponse } from "../../scraper/scrapeURL";
 import { logScrape } from "../logging/log_job";
 import { FeatureFlag } from "../../scraper/scrapeURL/engines";
 import {
-  recordMonitorScrapeFailure,
-  recordMonitorScrapeSuccess,
-} from "../monitoring/results";
-import {
   reportExchangeBilling,
   warmExchangeCatalog,
   type ExchangeScrapeMetadata,
 } from "../../lib/exchange";
 
 configDotenv();
-
-const jobLockExtendInterval = config.JOB_LOCK_EXTEND_INTERVAL;
-const jobLockExtensionTime = config.JOB_LOCK_EXTENSION_TIME;
 
 if (require.main === module) {
   cacheableLookup.install(http.globalAgent);
@@ -157,12 +146,6 @@ async function billScrapeJob(
       threatDecisions,
     );
 
-    // Charge the keyless free tier's per-IP daily credit budget unless this
-    // request reserved credits in the controller and will reconcile there.
-    if (!job.data.keylessReserved) {
-      await chargeKeylessCredits(job.data.team_id, creditsToBeBilled);
-    }
-
     if (
       job.data.team_id !== config.BACKGROUND_INDEX_TEAM_ID! &&
       config.USE_DB_AUTHENTICATION
@@ -174,40 +157,25 @@ async function billScrapeJob(
           properties: autumnProperties,
           featureId,
         });
-        const billingJobId = uuidv7();
-        logger.debug(
-          `Adding billing job to queue for team ${job.data.team_id}`,
-          {
-            billingJobId,
-            billing,
-            credits: creditsToBeBilled,
-            is_extract: false,
-          },
-        );
+        logger.debug(`Adding billing operation for team ${job.data.team_id}`, {
+          billing,
+          credits: creditsToBeBilled,
+          is_extract: false,
+        });
 
-        // Add directly to the billing queue - the billing worker will handle
-        // the rest, including confirming the Exchange access event once the
-        // debit actually commits. A failed commit leaves the event pending
-        // for reconciliation - it is never voided on an ambiguous outcome.
-        await getBillingQueue().add(
-          "bill_team",
-          {
-            team_id: job.data.team_id,
-            credits: creditsToBeBilled,
-            billing,
-            is_extract: false,
-            timestamp: new Date().toISOString(),
-            originating_job_id: job.id,
-            api_key_id: job.data.apiKeyId,
-            autumnTrackInRequest: trackedInRequest,
-            ...(exchange?.accessEventId === undefined
-              ? {}
-              : { exchangeAccessEventId: exchange.accessEventId }),
-          },
-          {
-            jobId: billingJobId,
-            priority: 10,
-          },
+        // Deployments.ai modification: upstream added a BullMQ billing job;
+        // the operation now goes to the in-process batch billing queue, which
+        // confirms the Exchange access event once the debit commits.
+        await queueBillingOperation(
+          job.data.team_id,
+          creditsToBeBilled,
+          job.data.apiKeyId ?? null,
+          billing,
+          false,
+          trackedInRequest,
+          exchange?.accessEventId === undefined
+            ? undefined
+            : { accessEventId: exchange.accessEventId },
         );
 
         return creditsToBeBilled;
@@ -488,11 +456,11 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
 
           // Prevent redirect target from being visited in the crawl again
           // See lockURL
-          const x = await redisEvictConnection.sadd(
-            "crawl:" + job.data.crawl_id + ":visited",
-            ...p1.map(x => x.href),
+          const added = await addVisitedURLs(
+            job.data.crawl_id,
+            p1.map(x => x.href),
           );
-          const lockRes = x === p1.length;
+          const lockRes = added === p1.length;
 
           if (job.data.crawlerOptions !== null && !lockRes) {
             throw new RacedRedirectError();
@@ -589,11 +557,9 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
 
             for (const link of discoveredLinks) {
               if (await lockURL(job.data.crawl_id, sc, link)) {
-                // This seems to work really welel
-                const jobPriority = await getJobPriority({
-                  team_id: sc.team_id,
-                  basePriority: job.data.crawl_id ? 20 : 10,
-                });
+                // Deployments.ai modification: static base priority (the
+                // Redis per-team priority decay is gone).
+                const jobPriority = job.data.crawl_id ? 20 : 10;
                 const jobId = uuidv7();
 
                 logger.debug(
@@ -760,8 +726,6 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
         }
       }
 
-      await recordMonitorScrapeSuccess(job, doc);
-
       logger.debug("Declaring job as done...");
       await addCrawlJobDone(job.data.crawl_id, job.id, true, logger);
     } else {
@@ -821,10 +785,6 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
         zeroDataRetention: job.data.zeroDataRetention,
       }).catch(err => logger.warn("Scrape tracking failed", { error: err }));
 
-      await recordMonitorScrapeSuccess(job, doc).catch(error =>
-        logger.warn("Failed to record monitor scrape result", { error }),
-      );
-
       if (job.data.skipNuq) {
         // doesn't use GCS for result retrieval, safe to not await
         logScrapePromise.catch(err =>
@@ -858,13 +818,9 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
 
       logger.debug("Declaring job as done...");
       await addCrawlJobDone(job.data.crawl_id, job.id, false, logger);
-      await redisEvictConnection.srem(
-        "crawl:" + job.data.crawl_id + ":visited_unique",
+      await releaseFailedCrawlJob(
+        job.data.crawl_id,
         normalizeURL(job.data.url, sc),
-      );
-
-      await redisEvictConnection.srem(
-        "crawl:" + job.data.crawl_id + ":jobs_qualified",
         job.id,
       );
     }
@@ -1037,8 +993,6 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
       zeroDataRetention: job.data.zeroDataRetention,
     }).catch(err => logger.warn("Scrape tracking failed", { error: err }));
 
-    await recordMonitorScrapeFailure(job, error);
-
     return data;
   } finally {
     if (abortTimeoutHandle) clearTimeout(abortTimeoutHandle);
@@ -1081,26 +1035,16 @@ async function addKickoffSitemapJob(
   sc: StoredCrawl,
   logger: Logger,
 ) {
-  // TEMP: max 20 sitemaps per crawl
-  if (
-    (await redisEvictConnection.scard(
-      "crawl:" + sourceJob.data.crawl_id + ":sitemaps",
-    )) >= 20
-  ) {
+  // TEMP: max 20 sitemaps per crawl (enforced atomically by the store)
+  const sitemapLock = await lockCrawlSitemap(
+    sourceJob.data.crawl_id,
+    sitemapUrl,
+  );
+  if (sitemapLock === "limit") {
     logger.debug("Sitemap limit reached, skipping...", { sitemap: sitemapUrl });
     return;
   }
-
-  const sitemapLocked =
-    (await redisEvictConnection.sadd(
-      "crawl:" + sourceJob.data.crawl_id + ":sitemaps",
-      sitemapUrl,
-    )) === 1;
-  await redisEvictConnection.expire(
-    "crawl:" + sourceJob.data.crawl_id + ":sitemaps",
-    24 * 60 * 60,
-  );
-  if (!sitemapLocked) {
+  if (sitemapLock === "duplicate") {
     logger.debug("Sitemap already hit, skipping...", { sitemap: sitemapUrl });
     return;
   }
@@ -1128,14 +1072,7 @@ async function addKickoffSitemapJob(
     jobId,
     21,
   );
-  await redisEvictConnection.sadd(
-    "crawl:" + sourceJob.data.crawl_id + ":sitemap_jobs",
-    jobId,
-  );
-  await redisEvictConnection.expire(
-    "crawl:" + sourceJob.data.crawl_id + ":sitemap_jobs",
-    24 * 60 * 60,
-  );
+  await addCrawlSitemapJob(sourceJob.data.crawl_id, jobId);
 }
 
 async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
@@ -1184,7 +1121,7 @@ async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
           : undefined,
       },
       jobId,
-      await getJobPriority({ team_id: job.data.team_id, basePriority: 15 }),
+      15,
     );
     logger.debug("Adding scrape job to BullMQ...", { jobId });
     await addCrawlJob(job.data.crawl_id, jobId, logger);
@@ -1289,10 +1226,7 @@ async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
         indexLinksLength: indexLinks.length,
       });
 
-      let jobPriority = await getJobPriority({
-        team_id: job.data.team_id,
-        basePriority: 21,
-      });
+      const jobPriority = 21;
       logger.debug("Using job priority " + jobPriority, { jobPriority });
 
       const jobs = indexLinks.map(url => {
@@ -1456,10 +1390,7 @@ async function processKickoffSitemapJob(job: NuQJob<ScrapeJobKickoffSitemap>) {
         urlsLength: passingURLs.length,
       });
 
-      const jobPriority = await getJobPriority({
-        team_id: job.data.team_id,
-        basePriority: 21,
-      });
+      const jobPriority = 21;
 
       const jobs = passingURLs.map(url => ({
         data: {
@@ -1520,14 +1451,7 @@ async function processKickoffSitemapJob(job: NuQJob<ScrapeJobKickoffSitemap>) {
     logger.error("An error occurred!", { error });
     return { success: false, error };
   } finally {
-    await redisEvictConnection.sadd(
-      "crawl:" + job.data.crawl_id + ":sitemap_jobs_done",
-      job.id,
-    );
-    await redisEvictConnection.expire(
-      "crawl:" + job.data.crawl_id + ":sitemap_jobs_done",
-      24 * 60 * 60,
-    );
+    await addCrawlSitemapJobDone(job.data.crawl_id, job.id);
   }
 }
 
@@ -1562,85 +1486,38 @@ export const processJobInternal = async (job: NuQJob<ScrapeJobData>) => {
 };
 
 async function processJobWithTracing(job: NuQJob<ScrapeJobData>, logger: any) {
-  // FDB-backed jobs hold their concurrency slot through the queue lease; the
-  // Redis slot mirror and promotion-on-done below are PG-backend machinery
-  const isFdbJob = (job as any).backend === "fdb";
+  // Deployments.ai modification: concurrency slots are held by the NuQ group
+  // gating (DynamoDB), so the Redis slot mirror, per-team job-priority
+  // bookkeeping and the most-recent-success marker are gone.
   try {
-    try {
-      let extendLockInterval: NodeJS.Timeout | null = null;
-      if (
-        !isFdbJob &&
-        job.data?.mode !== "kickoff" &&
-        job.data?.team_id &&
-        !job.data.skipNuq
-      ) {
-        extendLockInterval = setInterval(async () => {
-          await pushConcurrencyLimitActiveJob(
-            job.data.team_id,
-            job.id,
-            60 * 1000,
-          ); // 60s lock renew, just like in the queue
-        }, jobLockExtendInterval);
+    if (job.data.mode === "kickoff") {
+      const result = await processKickoffJob(job as NuQJob<ScrapeJobKickoff>);
+      if (result.success) {
+        return null;
+      } else {
+        throw (result as any).error;
       }
-
-      await addJobPriority(job.data.team_id, job.id);
-      try {
-        if (job.data.mode === "kickoff") {
-          const result = await processKickoffJob(
-            job as NuQJob<ScrapeJobKickoff>,
-          );
-          if (result.success) {
-            return null;
-          } else {
-            throw (result as any).error;
-          }
-        } else if (job.data.mode === "kickoff_sitemap") {
-          const result = await processKickoffSitemapJob(
-            job as NuQJob<ScrapeJobKickoffSitemap>,
-          );
-          if (result.success) {
-            return null;
-          } else {
-            throw (result as any).error;
-          }
+    } else if (job.data.mode === "kickoff_sitemap") {
+      const result = await processKickoffSitemapJob(
+        job as NuQJob<ScrapeJobKickoffSitemap>,
+      );
+      if (result.success) {
+        return null;
+      } else {
+        throw (result as any).error;
+      }
+    } else {
+      const result = await processJob(job as NuQJob<ScrapeJobSingleUrls>);
+      if (result.success) {
+        if (config.GCS_BUCKET_NAME && !job.data.skipNuq) {
+          logger.debug("Job succeeded -- result is read from GCS");
+          return null;
         } else {
-          const result = await processJob(job as NuQJob<ScrapeJobSingleUrls>);
-          if (result.success) {
-            try {
-              if (job.data.team_id) {
-                await redisEvictConnection.set(
-                  "most-recent-success:" + job.data.team_id,
-                  new Date().toISOString(),
-                  "EX",
-                  60 * 60 * 24,
-                );
-              }
-            } catch (e) {
-              logger.warn("Failed to set most recent success", { error: e });
-            }
-
-            try {
-              if (config.GCS_BUCKET_NAME && !job.data.skipNuq) {
-                logger.debug("Job succeeded -- putting null in Redis");
-                return null;
-              } else {
-                logger.debug("Job succeeded -- putting result in Redis");
-                return result.document;
-              }
-            } catch (e) {}
-          } else {
-            throw (result as any).error;
-          }
+          logger.debug("Job succeeded -- storing result in the queue");
+          return result.document;
         }
-      } finally {
-        await deleteJobPriority(job.data.team_id, job.id);
-        if (extendLockInterval) {
-          clearInterval(extendLockInterval);
-        }
-      }
-    } finally {
-      if (!job.data.skipNuq && !isFdbJob) {
-        await concurrentJobDone(job);
+      } else {
+        throw (result as any).error;
       }
     }
   } catch (error) {

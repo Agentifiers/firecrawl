@@ -2,7 +2,6 @@ import { EventDataMap, EventDefinitionSlug } from "./data-schemas";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/connection";
 import * as schema from "../../db/schema";
-import { getValue, setValue } from "../redis";
 import { logger } from "../../lib/logger";
 
 /**
@@ -16,35 +15,17 @@ export async function trackEvent<T extends EventDefinitionSlug>(
   data: EventDataMap[T],
 ): Promise<string | null> {
   try {
-    // Get the provider definition ID from cache or database
-    const cacheKey = `provider_definition_${definitionSlug}_`;
-    let providerDefinition: any = null;
-    let definitionError: any = null;
-
-    // Try to get from Redis cache first
-    const cachedData = await getValue(cacheKey);
-    if (cachedData) {
-      providerDefinition = JSON.parse(cachedData);
-    } else {
-      // If not in cache, fetch from database
-      try {
-        [providerDefinition] = await db
-          .select({ id: schema.provider_definitions.id })
-          .from(schema.provider_definitions)
-          .where(eq(schema.provider_definitions.slug, definitionSlug))
-          .limit(1);
-      } catch (error) {
-        definitionError = error;
-      }
-
-      // Cache the result for 24 hours (1440 minutes)
-      if (!definitionError && providerDefinition) {
-        await setValue(
-          cacheKey,
-          JSON.stringify(providerDefinition),
-          600 * 60 * 24,
-        );
-      }
+    // Deployments.ai: the Redis definition cache was removed with Redis.
+    let providerDefinition: { id: number } | undefined;
+    let definitionError: unknown = null;
+    try {
+      [providerDefinition] = await db
+        .select({ id: schema.provider_definitions.id })
+        .from(schema.provider_definitions)
+        .where(eq(schema.provider_definitions.slug, definitionSlug))
+        .limit(1);
+    } catch (error) {
+      definitionError = error;
     }
 
     if (definitionError || !providerDefinition) {

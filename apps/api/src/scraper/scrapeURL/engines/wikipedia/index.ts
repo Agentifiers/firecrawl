@@ -3,96 +3,62 @@ import { EngineScrapeResult } from "..";
 import { Meta } from "../..";
 import { config } from "../../../../config";
 import { EngineError } from "../../error";
-import { getRedisConnection } from "../../../../services/queue-service";
-import { redlock } from "../../../../services/redlock";
 
 const WIKIMEDIA_AUTH_URL = "https://auth.enterprise.wikimedia.com/v1/login";
 const WIKIMEDIA_API_BASE = "https://api.enterprise.wikimedia.com/v2";
 
-const REDIS_TOKEN_KEY = "wikipedia_enterprise:access_token";
-const REDIS_AUTH_LOCK_KEY = "lock:wikipedia_enterprise:auth";
+// Deployments.ai modification: the access token is cached per process (it
+// was shared through Redis with a redlock-guarded refresh). Concurrent
+// refreshes within a process share one in-flight authentication.
+let cachedToken: { value: string; expiresAt: number } | null = null;
+let pendingAuthentication: Promise<string> | null = null;
 
-async function getAccessToken(logger: Meta["logger"]): Promise<string> {
-  const redis = getRedisConnection();
+async function authenticate(logger: Meta["logger"]): Promise<string> {
+  const username = config.WIKIPEDIA_ENTERPRISE_USERNAME;
+  const password = config.WIKIPEDIA_ENTERPRISE_PASSWORD;
 
-  try {
-    const cached = await redis.get(REDIS_TOKEN_KEY);
-    if (cached) {
-      return cached;
-    }
-  } catch (error) {
-    logger.warn(
-      "Failed to read Wikipedia token from Redis, will re-authenticate",
-      { error },
+  if (!username || !password) {
+    throw new EngineError(
+      "Wikipedia Enterprise API credentials are not configured (WIKIPEDIA_ENTERPRISE_USERNAME, WIKIPEDIA_ENTERPRISE_PASSWORD)",
     );
   }
 
-  // Acquire a distributed lock so only one instance authenticates at a time.
-  // Others wait and then read the token from Redis.
-  return await redlock.using([REDIS_AUTH_LOCK_KEY], 10000, async signal => {
-    // Double-check: another instance may have authenticated while we waited for the lock
-    try {
-      const cached = await redis.get(REDIS_TOKEN_KEY);
-      if (cached) {
-        return cached;
-      }
-    } catch {}
+  logger.info("Authenticating with Wikipedia Enterprise API");
 
-    const username = config.WIKIPEDIA_ENTERPRISE_USERNAME;
-    const password = config.WIKIPEDIA_ENTERPRISE_PASSWORD;
-
-    if (!username || !password) {
-      throw new EngineError(
-        "Wikipedia Enterprise API credentials are not configured (WIKIPEDIA_ENTERPRISE_USERNAME, WIKIPEDIA_ENTERPRISE_PASSWORD)",
-      );
-    }
-
-    logger.info("Authenticating with Wikipedia Enterprise API");
-
-    const response = await undici.fetch(WIKIMEDIA_AUTH_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    });
-
-    if (signal.aborted) {
-      throw signal.error;
-    }
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new EngineError(
-        `Wikipedia Enterprise authentication failed (${response.status}): ${body}`,
-      );
-    }
-
-    const data = (await response.json()) as {
-      access_token: string;
-      expires_in: number;
-    };
-
-    const ttlSeconds = Math.max(data.expires_in - 300, 60);
-
-    try {
-      await redis.set(REDIS_TOKEN_KEY, data.access_token, "EX", ttlSeconds);
-    } catch (error) {
-      logger.warn("Failed to cache Wikipedia token in Redis", { error });
-    }
-
-    return data.access_token;
+  const response = await undici.fetch(WIKIMEDIA_AUTH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
   });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new EngineError(
+      `Wikipedia Enterprise authentication failed (${response.status}): ${body}`,
+    );
+  }
+
+  const data = (await response.json()) as {
+    access_token: string;
+    expires_in: number;
+  };
+
+  const ttlSeconds = Math.max(data.expires_in - 300, 60);
+  cachedToken = {
+    value: data.access_token,
+    expiresAt: Date.now() + ttlSeconds * 1000,
+  };
+  return data.access_token;
 }
 
-function clearCachedToken(logger: Meta["logger"]): void {
-  try {
-    getRedisConnection()
-      .del(REDIS_TOKEN_KEY)
-      .catch(error => {
-        logger.warn("Failed to clear Wikipedia token from Redis", { error });
-      });
-  } catch {
-    logger.warn("Failed to clear Wikipedia token from Redis");
+async function getAccessToken(logger: Meta["logger"]): Promise<string> {
+  if (cachedToken && cachedToken.expiresAt > Date.now()) {
+    return cachedToken.value;
   }
+  pendingAuthentication ??= authenticate(logger).finally(() => {
+    pendingAuthentication = null;
+  });
+  return pendingAuthentication;
 }
 
 // Maps Wikimedia project hostnames to project identifiers used by the Enterprise API.
@@ -284,7 +250,7 @@ export async function scrapeURLWithWikipedia(
   }
 
   if (response.status === 401 || response.status === 403) {
-    clearCachedToken(meta.logger);
+    cachedToken = null;
     throw new EngineError(
       `Wikipedia Enterprise API authorization failed (${response.status}). Check credentials.`,
     );

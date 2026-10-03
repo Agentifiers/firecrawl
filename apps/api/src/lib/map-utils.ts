@@ -15,7 +15,6 @@ import {
   resolveRedirects,
 } from "./validateUrl";
 import { fireEngineMap } from "../search/fireEngine";
-import { redisEvictConnection } from "../services/redis";
 import {
   generateURLSplits,
   queryIndexAtDomainSplitLevelWithMeta,
@@ -208,11 +207,8 @@ export async function getMapResults({
       Math.min(maxFireEngineResults, limit) / resultsPerPage,
     );
 
-    const cacheKey = `fireEngineMap:${mapUrl}`;
-    const cachedResult = ignoreCache
-      ? null
-      : await redisEvictConnection.get(cacheKey);
-
+    // Deployments.ai: the 48h Redis cache of search-engine map results was
+    // removed with Redis; results are fetched per request.
     const fetchPage = async (page: number) => {
       return await fireEngineMap(
         mapUrl,
@@ -225,9 +221,6 @@ export async function getMapResults({
     };
 
     const fetchAllPages = async (): Promise<any[]> => {
-      if (cachedResult) {
-        return JSON.parse(cachedResult);
-      }
       // if page 1 has no results, don't fetch remaining pages
       const page1Result = await fetchPage(1);
       if (!page1Result || page1Result.length === 0 || maxPages === 1) {
@@ -243,15 +236,6 @@ export async function getMapResults({
       queryIndex(url, limit, useIndex, includeSubdomains),
       fetchAllPages(),
     ]);
-
-    if (!zeroDataRetention) {
-      await redisEvictConnection.set(
-        cacheKey,
-        JSON.stringify(searchResults),
-        "EX",
-        48 * 60 * 60,
-      ); // Cache for 48 hours
-    }
 
     if (indexResults.length > 0) {
       mapResults.push(...indexResults);

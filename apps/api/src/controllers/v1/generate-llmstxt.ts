@@ -1,3 +1,5 @@
+// Deployments.ai modification: jobs go to the DynamoDB `llmstxt` NuQ queue
+// instead of BullMQ.
 import { v7 as uuidv7 } from "uuid";
 import { Response } from "express";
 import {
@@ -6,7 +8,7 @@ import {
   generateLLMsTextRequestSchema,
   RequestWithAuth,
 } from "./types";
-import { getGenerateLlmsTxtQueue } from "../../services/queue-service";
+import { llmsTxtQueue } from "../../services/worker/nuq";
 import * as Sentry from "@sentry/node";
 import { saveGeneratedLlmsTxt } from "../../lib/generate-llmstxt/generate-llmstxt-redis";
 import { logRequest } from "../../services/logging/log_job";
@@ -72,8 +74,8 @@ export async function generateLLMsTextController(
     fullText: "",
   });
 
-  await getGenerateLlmsTxtQueue().add(generationId, jobData, {
-    jobId: generationId,
+  await llmsTxtQueue.addJob(generationId, jobData, {
+    ownerId: req.auth.team_id,
   });
 
   return res.status(200).json({

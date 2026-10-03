@@ -8,8 +8,10 @@ import { NotificationType } from "../../types";
 import { logger } from "../../../src/lib/logger";
 import { sendSlackWebhook } from "../alerts/slack";
 import { getNotificationString } from "./notification_string";
-import { redlock } from "../redlock";
-import { redisEvictConnection } from "../redis";
+// Deployments.ai modification: the Redis "recently sent" markers and the
+// redlock per-team notification lock were removed with Redis; the
+// user_notifications table check (already done upstream) is the only
+// dedupe, so two concurrent sends can both email (database auth only).
 import { trackEvent } from "../ledger/tracking";
 
 type NotificationContext = {
@@ -214,10 +216,8 @@ async function sendNotificationInternal(
   if (team_id === "preview" || team_id.startsWith("preview_")) {
     return { success: true };
   }
-  return await redlock.using(
-    [`notification-lock:${team_id}:${notificationType}`],
-    5000,
-    async () => {
+  return await (async () => {
+    {
       if (!bypassRecentChecks) {
         const fifteenDaysAgo = new Date();
         fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
@@ -344,8 +344,8 @@ async function sendNotificationInternal(
       }
 
       return { success: true };
-    },
-  );
+    }
+  })();
 }
 
 export async function sendNotificationWithCustomDays(
@@ -363,25 +363,6 @@ export async function sendNotificationWithCustomDays(
       bypassRecentChecks: boolean,
       is_ledger_enabled: boolean,
     ) => {
-      const redisKey = "notification_sent:" + notificationType + ":" + team_id;
-
-      const didSendRecentNotification =
-        (await redisEvictConnection.get(redisKey)) !== null;
-
-      if (didSendRecentNotification && !bypassRecentChecks) {
-        logger.debug(
-          `Notification already sent within the last ${daysBetweenEmails} days for team_id: ${team_id} and notificationType: ${notificationType}`,
-        );
-        return { success: true };
-      }
-
-      await redisEvictConnection.set(
-        redisKey,
-        "1",
-        "EX",
-        daysBetweenEmails * 24 * 60 * 60,
-      );
-
       const now = new Date();
       const pastDate = new Date(
         now.getTime() - daysBetweenEmails * 24 * 60 * 60 * 1000,
@@ -403,19 +384,12 @@ export async function sendNotificationWithCustomDays(
         logger.debug(
           `Error fetching recent notifications: ${recentNotificationsError}`,
         );
-        await redisEvictConnection.del(redisKey); // free up redis, let it try again
         return { success: false };
       }
 
       if (recentNotifications.length > 0 && !bypassRecentChecks) {
         logger.debug(
           `Notification already sent within the last ${daysBetweenEmails} days for team_id: ${team_id} and notificationType: ${notificationType}`,
-        );
-        await redisEvictConnection.set(
-          redisKey,
-          "1",
-          "EX",
-          daysBetweenEmails * 24 * 60 * 60,
         );
         return { success: true };
       }
@@ -432,7 +406,6 @@ export async function sendNotificationWithCustomDays(
           .where(eq(schema.users.team_id, team_id));
       } catch (emailsError) {
         logger.debug(`Error fetching emails: ${emailsError}`);
-        await redisEvictConnection.del(redisKey); // free up redis, let it try again
         return { success: false };
       }
 
@@ -482,7 +455,6 @@ export async function sendNotificationWithCustomDays(
 
       if (insertError) {
         logger.debug(`Error inserting notification record: ${insertError}`);
-        await redisEvictConnection.del(redisKey); // free up redis, let it try again
         return { success: false };
       }
 

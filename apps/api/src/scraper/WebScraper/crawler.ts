@@ -6,7 +6,7 @@ import { getLinksFromSitemap } from "./sitemap";
 import robotsParser, { Robot } from "robots-parser";
 import { getURLDepth } from "./utils/maxDepthUtils";
 import { logger as _logger } from "../../lib/logger";
-import { redisEvictConnection } from "../../services/redis";
+import { addMembers, nowSeconds } from "../../lib/crawl-dynamo";
 import { extractLinks } from "@mendable/firecrawl-rs";
 import {
   fetchRobotsTxt,
@@ -19,6 +19,22 @@ import { filterLinks, filterUrl } from "@mendable/firecrawl-rs";
 
 export const SITEMAP_LIMIT = 25;
 const SITEMAP_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+/** Lifetime of the per-job sitemap link dedupe set (upstream: 1 hour). */
+const SITEMAP_LINKS_TTL_SECONDS = 3600;
+
+/**
+ * SADD of normalized sitemap links for one job; true per newly added link.
+ * Each member carries its own one-hour TTL (upstream set one TTL for the
+ * whole set at first write).
+ */
+function addSitemapLinks(jobId: string, links: string[]): Promise<boolean[]> {
+  return addMembers({
+    pk: "sitemap#" + jobId,
+    prefix: "link#",
+    members: links,
+    ttl: nowSeconds() + SITEMAP_LINKS_TTL_SECONDS,
+  });
+}
 
 interface FilterResult {
   allowed: boolean;
@@ -564,28 +580,12 @@ export class WebCrawler {
         );
         let filteredLinks = filteredLinksResult.links;
         leftOfLimit -= filteredLinks.length;
-        const pipeline = redisEvictConnection.pipeline();
-
-        const normalizedUrls = filteredLinks.map(url => normalizeUrl(url));
-        normalizedUrls.forEach(normalizedUrl => {
-          pipeline.sadd("sitemap:" + this.jobId + ":links", normalizedUrl);
-        });
-
-        const results = await pipeline.exec();
-
-        const uniqueURLs = filteredLinks.filter(
-          (_, index) =>
-            results &&
-            results[index] &&
-            !results[index][0] &&
-            results[index][1] === 1,
+        // Deployments.ai: per-job link dedupe in DynamoDB (was a Redis set).
+        const added = await addSitemapLinks(
+          this.jobId,
+          filteredLinks.map(url => normalizeUrl(url)),
         );
-
-        await redisEvictConnection.expire(
-          "sitemap:" + this.jobId + ":links",
-          3600,
-          "NX",
-        );
+        const uniqueURLs = filteredLinks.filter((_, index) => added[index]);
 
         if (uniqueURLs.length > 0) {
           return await urlsHandler(uniqueURLs);
@@ -630,22 +630,14 @@ export class WebCrawler {
       })) as number;
 
       if (count > 0) {
-        if (
-          await redisEvictConnection.sadd(
-            "sitemap:" + this.jobId + ":links",
-            normalizeUrl(this.initialUrl),
-          )
-        ) {
+        const [initialAdded] = await addSitemapLinks(this.jobId, [
+          normalizeUrl(this.initialUrl),
+        ]);
+        if (initialAdded) {
           urlsHandler([this.initialUrl]);
         }
         count++;
       }
-
-      await redisEvictConnection.expire(
-        "sitemap:" + this.jobId + ":links",
-        3600,
-        "NX",
-      );
 
       return count;
     } catch (error) {

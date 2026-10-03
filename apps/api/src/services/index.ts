@@ -1,8 +1,5 @@
 import { logger as _logger } from "../lib/logger";
-import { dbIndex } from "../db/connection";
-import * as schema from "../db/schema";
 import {
-  insertOmceJobIfNeeded,
   queryIndexAtSplitLevel as rpcQueryIndexAtSplitLevel,
   queryIndexAtDomainSplitLevel as rpcQueryIndexAtDomainSplitLevel,
   queryOmceSignatures as rpcQueryOmceSignatures,
@@ -14,13 +11,6 @@ import {
 import { configDotenv } from "dotenv";
 import { ApiError } from "@google-cloud/storage";
 import crypto from "crypto";
-import { redisEvictConnection } from "./redis";
-import {
-  deriveIndexVariantKey,
-  upsertCachedIndexEntries,
-  useIndexCache,
-  type IndexCacheEntry,
-} from "./index-cache";
 import type { Logger } from "winston";
 import psl from "psl";
 import { MapDocument } from "../controllers/v2/types";
@@ -280,161 +270,9 @@ export function generateDomainSplits(
   return domains;
 }
 
-const INDEX_INSERT_QUEUE_KEY = "index-insert-queue";
-const INDEX_INSERT_BATCH_SIZE = 100;
-
-export async function addIndexInsertJob(data: any) {
-  await redisEvictConnection.rpush(
-    INDEX_INSERT_QUEUE_KEY,
-    JSON.stringify(data),
-  );
-}
-
-function reviveBuffers(_key: string, value: any) {
-  return value?.type === "Buffer" && Array.isArray(value.data)
-    ? Buffer.from(value.data)
-    : value;
-}
-
-function safeParseJob<T>(raw: string, queueKey: string): T | undefined {
-  try {
-    return JSON.parse(raw, reviveBuffers) as T;
-  } catch (error) {
-    _logger.error(`Failed to parse queued job, skipping`, {
-      error,
-      queueKey,
-      raw,
-    });
-    return undefined;
-  }
-}
-
-async function getIndexInsertJobs(): Promise<any[]> {
-  const jobs =
-    (await redisEvictConnection.lpop(
-      INDEX_INSERT_QUEUE_KEY,
-      INDEX_INSERT_BATCH_SIZE,
-    )) ?? [];
-  return jobs
-    .map(x => safeParseJob<any>(x, INDEX_INSERT_QUEUE_KEY))
-    .filter(x => x !== undefined);
-}
-
-export async function processIndexInsertJobs() {
-  const jobs = await getIndexInsertJobs();
-  if (jobs.length === 0) {
-    return;
-  }
-  _logger.info(`Index inserter found jobs to insert`, {
-    jobCount: jobs.length,
-  });
-  try {
-    await dbIndex.insert(schema.index).values(jobs);
-    _logger.info(`Index inserter inserted jobs`, { jobCount: jobs.length });
-    writeThroughIndexCache(jobs);
-  } catch (error) {
-    _logger.error(`Index inserter failed to insert jobs`, {
-      error,
-      jobCount: jobs.length,
-    });
-  }
-}
-
-// Write-through to the Dragonfly index cache after rows are durably in the
-// index DB. created_at approximates the DB's defaultNow() by milliseconds,
-// which is irrelevant against day-scale maxAge windows. Fire-and-forget: a
-// cache failure must never affect the insert loop.
-function writeThroughIndexCache(jobs: any[]) {
-  if (!useIndexCache) {
-    return;
-  }
-  const createdAt = new Date().toISOString();
-  const byKey = new Map<string, IndexCacheEntry[]>();
-  for (const job of jobs) {
-    if (!Buffer.isBuffer(job.url_hash) || typeof job.id !== "string") {
-      continue;
-    }
-    const key = deriveIndexVariantKey({
-      urlHash: job.url_hash,
-      isMobile: job.is_mobile,
-      blockAds: job.block_ads,
-      isStealth: job.is_stealth,
-      locationCountry: job.location_country ?? null,
-      locationLanguages: job.location_languages ?? null,
-    });
-    const entries = byKey.get(key) ?? [];
-    entries.push({
-      id: job.id,
-      created_at: createdAt,
-      status: job.status,
-      has_screenshot: job.has_screenshot,
-      has_screenshot_fullscreen: job.has_screenshot_fullscreen,
-      wait_time_ms: job.wait_time_ms ?? null,
-    });
-    byKey.set(key, entries);
-  }
-  for (const [key, entries] of byKey) {
-    upsertCachedIndexEntries(key, entries, _logger).catch(error => {
-      _logger.warn("Index cache write-through failed", { error, key });
-    });
-  }
-}
-
-export async function getIndexInsertQueueLength(): Promise<number> {
-  return (await redisEvictConnection.llen(INDEX_INSERT_QUEUE_KEY)) ?? 0;
-}
-
-const OMCE_JOB_QUEUE_KEY = "omce-job-queue";
-const OMCE_JOB_QUEUE_BATCH_SIZE = 100;
-
-export async function addOMCEJob(data: [number, Buffer]) {
-  await redisEvictConnection.sadd(OMCE_JOB_QUEUE_KEY, JSON.stringify(data));
-}
-
-async function getOMCEJobs(): Promise<[number, Buffer][]> {
-  const jobs =
-    (await redisEvictConnection.spop(
-      OMCE_JOB_QUEUE_KEY,
-      OMCE_JOB_QUEUE_BATCH_SIZE,
-    )) ?? [];
-  return jobs
-    .map(x => safeParseJob<[number, Buffer]>(x, OMCE_JOB_QUEUE_KEY))
-    .filter((x): x is [number, Buffer] => x !== undefined);
-}
-
-export async function processOMCEJobs() {
-  const jobs = await getOMCEJobs();
-  if (jobs.length === 0) {
-    return;
-  }
-  _logger.info(`OMCE job inserter found jobs to insert`, {
-    jobCount: jobs.length,
-  });
-  try {
-    for (const job of jobs) {
-      const [level, hash] = job;
-      try {
-        await insertOmceJobIfNeeded(level, hash);
-      } catch (error) {
-        _logger.error(`OMCE job inserter failed to insert job`, {
-          error,
-          job,
-          jobCount: jobs.length,
-        });
-      }
-    }
-    _logger.info(`OMCE job inserter inserted jobs`, { jobCount: jobs.length });
-  } catch (error) {
-    _logger.error(`OMCE job inserter failed to insert jobs`, {
-      error,
-      jobCount: jobs.length,
-    });
-  }
-}
-
-export async function getOMCEQueueLength(): Promise<number> {
-  return (await redisEvictConnection.scard(OMCE_JOB_QUEUE_KEY)) ?? 0;
-}
+// Deployments.ai: the Redis index-insert/OMCE buffers drained by the hosted
+// index worker are removed; sendDocumentToIndex writes to the index DB directly.
+// The Dragonfly index cache (services/index-cache.ts) is removed as well.
 
 export async function queryIndexAtSplitLevel(
   url: string,

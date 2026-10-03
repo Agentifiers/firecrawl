@@ -3,12 +3,7 @@ vi.mock("uuid", () => ({
 }));
 
 import { scrapeSearchResults } from "./scrape";
-import { getJobPriority } from "../lib/job-priority";
 import { processJobInternal } from "../services/worker/scrape-worker";
-
-vi.mock("../lib/job-priority", () => ({
-  getJobPriority: vi.fn().mockResolvedValue(10),
-}));
 
 vi.mock("../services/worker/scrape-worker", () => ({
   processJobInternal: vi.fn().mockResolvedValue({
@@ -40,12 +35,10 @@ describe("scrapeSearchResults", () => {
       null as any,
     );
 
-    expect(getJobPriority).toHaveBeenCalledWith({
-      team_id: "team-1",
-      basePriority: 10,
-    });
     expect(processJobInternal).toHaveBeenCalledWith(
       expect.objectContaining({
+        // Deployments.ai: the base priority (Redis job priority was removed).
+        priority: 10,
         data: expect.objectContaining({
           billing: { endpoint: "agent" },
         }),

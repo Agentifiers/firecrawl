@@ -1,16 +1,14 @@
 import { eq } from "drizzle-orm";
 import { dbRr } from "../db/connection";
 import * as schema from "../db/schema";
-import { deleteKey, getValue, setValue } from "../services/redis";
 import { logger } from "./logger";
 import type { TeamFlags } from "../controllers/v1/types";
 
-// Propagation delay for dashboard edits to key_restriction_config.
-const CONFIG_CACHE_TTL_SECONDS = 60;
+// Deployments.ai modification: the per-key config is read from the database
+// on each check; its Redis cache (and the cache-clear helper used only by the
+// removed admin routes) went away with Redis.
 
 const MANAGE_RESTRICTIONS_URL = "https://www.firecrawl.dev/app/api-keys";
-
-const configCacheKey = (apiKeyId: number) => `key-restriction:${apiKeyId}`;
 
 export type KeyRestrictionConfig = {
   allowedFormats: string[];
@@ -19,18 +17,6 @@ export type KeyRestrictionConfig = {
 
 function isKeyRestricted(config: KeyRestrictionConfig): boolean {
   return config.allowedFormats.length > 0 || config.allowedEndpoints.length > 0;
-}
-
-// Invalidates the cached config so dashboard edits apply immediately
-// (admin route key-restriction-cache-clear).
-export async function clearKeyRestrictionCache(
-  apiKeyId: number,
-): Promise<void> {
-  await deleteKey(configCacheKey(apiKeyId));
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(x => typeof x === "string");
 }
 
 function asStringArray(value: unknown): string[] {
@@ -42,38 +28,6 @@ function asStringArray(value: unknown): string[] {
 async function getKeyRestrictionConfig(
   apiKeyId: number,
 ): Promise<KeyRestrictionConfig> {
-  const cacheKey = configCacheKey(apiKeyId);
-
-  try {
-    const cached = await getValue(cacheKey);
-    if (cached !== null) {
-      const parsed = JSON.parse(cached);
-      // A corrupted-but-parseable cache entry must not reach enforcement:
-      // coercing a bad shape to [] would silently lift the restriction, so
-      // anything that isn't strictly two string arrays is a cache miss and
-      // the DB-backed config applies instead.
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed) &&
-        isStringArray(parsed.allowedFormats) &&
-        isStringArray(parsed.allowedEndpoints)
-      ) {
-        return {
-          allowedFormats: parsed.allowedFormats,
-          allowedEndpoints: parsed.allowedEndpoints,
-        };
-      }
-      logger.warn("Ignoring malformed key restriction cache entry", {
-        apiKeyId,
-      });
-    }
-  } catch (error) {
-    logger.warn("Failed to read key restriction config cache", {
-      apiKeyId,
-      error,
-    });
-  }
 
   const [row] = await dbRr
     .select({
@@ -84,18 +38,11 @@ async function getKeyRestrictionConfig(
     .where(eq(schema.key_restriction_config.api_key_id, apiKeyId))
     .limit(1);
 
-  // A missing row means the key is unrestricted; cached the same way as a
-  // configured row so unrestricted keys of flagged teams also skip the DB.
+  // A missing row means the key is unrestricted.
   const config: KeyRestrictionConfig = {
     allowedFormats: asStringArray(row?.allowed_formats),
     allowedEndpoints: asStringArray(row?.allowed_endpoints),
   };
-
-  try {
-    await setValue(cacheKey, JSON.stringify(config), CONFIG_CACHE_TTL_SECONDS);
-  } catch (error) {
-    logger.warn("Failed to cache key restriction config", { apiKeyId, error });
-  }
 
   return config;
 }

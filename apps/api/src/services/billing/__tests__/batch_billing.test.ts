@@ -1,9 +1,9 @@
 import { vi } from "vitest";
 
 // vi.mock is hoisted above the file's static imports, so any value a factory
-// reads at build time must be created in vi.hoisted(). (Jest left jest.mock
-// un-hoisted here because `jest` was imported from @jest/globals.) The `redis`
-// stub below stays module-level: its factory only captures it lazily.
+// reads at build time must be created in vi.hoisted(). Deployments.ai: the
+// batch queue is in-process (it was a Redis list), so tests enqueue through
+// queueBillingOperation.
 const {
   captureException,
   logger,
@@ -53,91 +53,30 @@ vi.mock("../../../db/rpc", () => ({
   billTeam7,
 }));
 
-let queue: string[] = [];
-const billedTeams = new Set<string>();
-const locks = new Map<string, string>();
-const redis = {
-  set: vi.fn(
-    async (
-      key: string,
-      value: string,
-      mode: string,
-      timeout: number,
-      nx: string,
-    ) => {
-      if (
-        key !== "billing_batch_lock" ||
-        value !== "1" ||
-        mode !== "PX" ||
-        timeout !== 30000 ||
-        nx !== "NX"
-      ) {
-        throw new Error("unexpected redis.set args");
-      }
-      if (locks.has(key)) return null;
-      locks.set(key, value);
-      return "OK";
-    },
-  ),
-  del: vi.fn(async (key: string) => {
-    if (key !== "billing_batch_lock") {
-      throw new Error("unexpected redis.del key");
-    }
-    return locks.delete(key) ? 1 : 0;
-  }),
-  lpop: vi.fn(async (key: string) => {
-    if (key !== "billing_batch") {
-      throw new Error("unexpected redis.lpop key");
-    }
-    return queue.shift() ?? null;
-  }),
-  llen: vi.fn(async (key: string) => {
-    if (key !== "billing_batch") {
-      throw new Error("unexpected redis.llen key");
-    }
-    return queue.length;
-  }),
-  rpush: vi.fn(async (key: string, value: string) => {
-    if (key !== "billing_batch") {
-      throw new Error("unexpected redis.rpush key");
-    }
-    queue.push(value);
-    return queue.length;
-  }),
-  sadd: vi.fn(async (key: string, teamId: string) => {
-    if (key !== "billed_teams") {
-      throw new Error("unexpected redis.sadd key");
-    }
-    billedTeams.add(teamId);
-    return 1;
-  }),
-};
-vi.mock("../../queue-service", () => ({
-  getRedisConnection: () => redis,
-}));
+import { processBillingBatch, queueBillingOperation } from "../batch_billing";
 
-import { processBillingBatch } from "../batch_billing";
-
-function makeOp(overrides: Record<string, unknown> = {}) {
-  return JSON.stringify({
-    team_id: "team-1",
-    credits: 10,
-    billing: { endpoint: "extract" },
-    is_extract: false,
-    timestamp: "2026-03-13T00:00:00.000Z",
-    api_key_id: 123,
-    ...overrides,
-  });
+async function enqueue(
+  overrides: { team_id?: string; autumnTrackInRequest?: boolean } = {},
+) {
+  await queueBillingOperation(
+    overrides.team_id ?? "team-1",
+    10,
+    123,
+    { endpoint: "extract" },
+    false,
+    overrides.autumnTrackInRequest ?? false,
+  );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
-  queue = [];
-  billedTeams.clear();
-  locks.clear();
   billTeam7.mockResolvedValue([]);
   trackCredits.mockResolvedValue(true);
   refundCredits.mockResolvedValue(undefined);
+  // Drain anything a previous test left behind.
+  await processBillingBatch();
+  vi.clearAllMocks();
+  billTeam7.mockResolvedValue([]);
 });
 
 describe("processBillingBatch", () => {
@@ -145,7 +84,7 @@ describe("processBillingBatch", () => {
     // Even when an op was not request-tracked, the batch must not track usage
     // to Autumn — request-time tracking is the single source, so re-tracking
     // here would double-count. The batch only commits the ledger.
-    queue = [makeOp()];
+    await enqueue();
 
     await processBillingBatch();
 
@@ -155,7 +94,7 @@ describe("processBillingBatch", () => {
   });
 
   it("does not re-track even when the op was already tracked at request time", async () => {
-    queue = [makeOp({ autumnTrackInRequest: true })];
+    await enqueue({ autumnTrackInRequest: true });
 
     await processBillingBatch();
 
@@ -164,7 +103,7 @@ describe("processBillingBatch", () => {
   });
 
   it("refunds request-tracked credits when billing returns success false", async () => {
-    queue = [makeOp({ autumnTrackInRequest: true })];
+    await enqueue({ autumnTrackInRequest: true });
     billTeam7.mockRejectedValueOnce(new Error("db failed"));
 
     await processBillingBatch();
@@ -183,7 +122,7 @@ describe("processBillingBatch", () => {
   });
 
   it("captures exceptions and refunds when billing throws", async () => {
-    queue = [makeOp({ autumnTrackInRequest: true })];
+    await enqueue({ autumnTrackInRequest: true });
     billTeam7.mockRejectedValueOnce(new Error("rpc exploded"));
 
     await processBillingBatch();
@@ -202,16 +141,8 @@ describe("processBillingBatch", () => {
   });
 
   it("continues processing later groups when an Autumn refund fails", async () => {
-    queue = [
-      makeOp({
-        team_id: "team-1",
-        autumnTrackInRequest: true,
-      }),
-      makeOp({
-        team_id: "team-2",
-        autumnTrackInRequest: true,
-      }),
-    ];
+    await enqueue({ team_id: "team-1", autumnTrackInRequest: true });
+    await enqueue({ team_id: "team-2", autumnTrackInRequest: true });
     billTeam7
       .mockRejectedValueOnce(new Error("db failed"))
       .mockResolvedValueOnce([]);

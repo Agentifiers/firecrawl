@@ -1,3 +1,4 @@
+// Deployments.ai modification: getACUCTeam lost its cache flags.
 import { Response } from "express";
 import { RequestWithAuth } from "./types";
 import { billTeam } from "../../services/billing/credit_billing";
@@ -33,8 +34,7 @@ export async function fireclawController(
   const totalCredits = plays * FIRECLAW_COST_PER_PLAY;
 
   const chunk =
-    req.acuc ??
-    (await getACUCTeam(req.auth.team_id, false, false, RateLimiterMode.Scrape));
+    req.acuc ?? (await getACUCTeam(req.auth.team_id, RateLimiterMode.Scrape));
 
   if (!chunk) {
     res.status(404).json({

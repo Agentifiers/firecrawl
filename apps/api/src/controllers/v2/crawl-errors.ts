@@ -5,8 +5,12 @@ import {
   CrawlStatusParams,
   RequestWithAuth,
 } from "./types";
-import { getCrawl, getCrawlJobs } from "../../lib/crawl-redis";
-import { redisEvictConnection } from "../../../src/services/redis";
+// Deployments.ai: robots-blocked URLs come from the crawl store, not raw Redis.
+import {
+  getCrawl,
+  getCrawlJobs,
+  getRobotsBlocked,
+} from "../../lib/crawl-redis";
 import { configDotenv } from "dotenv";
 import { and, eq } from "drizzle-orm";
 import { dbRr } from "../../db/connection";
@@ -14,7 +18,7 @@ import * as schema from "../../db/schema";
 import { logger as _logger } from "../../lib/logger";
 import { deserializeTransportableError } from "../../lib/error-serde";
 import { TransportableError } from "../../lib/error";
-import { scrapeQueue } from "../../services/worker/nuq-router";
+import { scrapeQueue } from "../../services/worker/nuq";
 configDotenv();
 
 export async function crawlErrorsController(
@@ -71,9 +75,7 @@ export async function crawlErrorsController(
           };
         })
         .filter(x => x !== null),
-      robotsBlocked: await redisEvictConnection.smembers(
-        "crawl:" + req.params.jobId + ":robots_blocked",
-      ),
+      robotsBlocked: await getRobotsBlocked(req.params.jobId),
     });
   } else if (config.USE_DB_AUTHENTICATION) {
     // Check the requests table for the crawl/batch scrape request
@@ -153,9 +155,7 @@ export async function crawlErrorsController(
               }),
         };
       }),
-      robotsBlocked: await redisEvictConnection.smembers(
-        "crawl:" + req.params.jobId + ":robots_blocked",
-      ),
+      robotsBlocked: await getRobotsBlocked(req.params.jobId),
     });
   } else {
     return res.status(404).json({ success: false, error: "Job not found" });

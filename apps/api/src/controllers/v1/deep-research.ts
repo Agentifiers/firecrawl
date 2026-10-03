@@ -1,3 +1,5 @@
+// Deployments.ai modification: jobs go to the DynamoDB `deep_research` NuQ
+// queue instead of BullMQ.
 import { v7 as uuidv7 } from "uuid";
 import { Request, Response } from "express";
 import { ErrorResponse, extractOptions, RequestWithAuth } from "./types";

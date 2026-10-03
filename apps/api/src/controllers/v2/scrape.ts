@@ -22,24 +22,15 @@ import {
 import { withSpan, setSpanAttributes, SpanKind } from "../../lib/otel-tracer";
 import { processJobInternal } from "../../services/worker/scrape-worker";
 import { ScrapeJobData } from "../../types";
-import { teamConcurrencySemaphore } from "../../services/worker/team-semaphore";
-import { getJobPriority } from "../../lib/job-priority";
 import { logRequest } from "../../services/logging/log_job";
 import { getErrorContactMessage } from "../../lib/deployment";
 import { captureExceptionWithZdrCheck } from "../../services/sentry";
 import type { BillingMetadata } from "../../services/billing/types";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
-import {
-  KEYLESS_FREE_TIER_LIMIT_MESSAGE,
-  adjustKeylessCredits,
-  logKeylessCreditUsage,
-  reserveKeylessCredits,
-} from "../../lib/keyless";
-import { projectScrapeCredits } from "../../lib/keyless-credit-projection";
-import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
+// Deployments.ai modification: no Redis team semaphore, job-priority decay or
+// keyless credit reservations; scrapes run directly at priority 10.
 import { resolveThreatProtection } from "../../lib/threat-protection/request";
 
-const AGENT_INTEROP_CONCURRENCY_BOOST = 3;
 
 export async function scrapeController(
   req: RequestWithAuth<{}, ScrapeResponse, ScrapeRequest>,
@@ -162,37 +153,9 @@ export async function scrapeController(
 
       const shouldBill = req.body.__agentInterop?.shouldBill ?? true;
       const agentRequestId = req.body.__agentInterop?.requestId ?? null;
-      const boostConcurrency =
-        req.body.__agentInterop?.boostConcurrency ?? false;
       const isDirectToBullMQ =
         config.SEARCH_PREVIEW_TOKEN !== undefined &&
         config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
-      const projectedKeylessCredits =
-        shouldBill && !isDirectToBullMQ
-          ? projectScrapeCredits(
-              req.body,
-              req.acuc?.flags ?? null,
-              zeroDataRetention,
-            )
-          : 0;
-      let reservedKeylessCredits = 0;
-      let reconciledKeylessCredits = false;
-
-      if (projectedKeylessCredits > 0) {
-        const reservation = await reserveKeylessCredits(
-          req.auth.team_id,
-          projectedKeylessCredits,
-        );
-        if (!reservation.ok) {
-          applyAgentAuthDiscoveryHeader(res);
-          return res.status(429).json({
-            success: false,
-            error: KEYLESS_FREE_TIER_LIMIT_MESSAGE,
-          });
-        }
-        reservedKeylessCredits = projectedKeylessCredits;
-      }
-
       const logger = _logger.child({
         method: "scrapeController",
         jobId,
@@ -247,127 +210,73 @@ export async function scrapeController(
           0,
         );
 
-      let lockTime: number | null = null;
-      let concurrencyLimited: boolean = false;
+      const lockTime: number | null = null;
+      const concurrencyLimited = false;
 
-      let timeoutHandle: NodeJS.Timeout | null = null;
       let doc: Document | null = null;
 
       try {
-        const lockStart = Date.now();
-        const aborter = new AbortController();
-        if (timeout) {
-          // Semaphore has 2/3 of the timeout time to get a lock to allow for scrape time
-          timeoutHandle = setTimeout(() => {
-            aborter.abort();
-          }, timeout * 0.667);
-        }
-        req.on("close", () => aborter.abort());
+        doc = await withSpan("api.scrape.wait_for_job", async waitSpan => {
+          setSpanAttributes(waitSpan, {
+            "wait.timeout":
+              timeout !== undefined ? timeout + totalWait : undefined,
+            "wait.job_id": jobId,
+          });
 
-        const baseConcurrency = req.acuc?.concurrency || 1;
-        const concurrency = boostConcurrency
-          ? baseConcurrency * AGENT_INTEROP_CONCURRENCY_BOOST
-          : baseConcurrency;
+          const job: NuQJob<ScrapeJobData> = {
+            id: jobId,
 
-        doc = await teamConcurrencySemaphore.withSemaphore(
-          req.auth.team_id,
-          jobId,
-          concurrency,
-          aborter.signal,
-          timeout ?? 60_000,
-          async limited => {
-            const jobPriority = await getJobPriority({
+            status: "active",
+            createdAt: new Date(),
+            priority: 10,
+            data: {
+              url: req.body.url,
+              mode: "single_urls",
               team_id: req.auth.team_id,
-              basePriority: 10,
-            });
-
-            lockTime = Date.now() - lockStart;
-            concurrencyLimited = limited;
-
-            logger.debug(`Lock acquired for team: ${req.auth.team_id}`, {
-              teamId: req.auth.team_id,
-              lockTime,
-              limited,
-            });
-
-            // Wait for job completion span
-            const doc = await withSpan(
-              "api.scrape.wait_for_job",
-              async waitSpan => {
-                setSpanAttributes(waitSpan, {
-                  "wait.timeout":
-                    timeout !== undefined ? timeout + totalWait : undefined,
-                  "wait.job_id": jobId,
-                });
-
-                const job: NuQJob<ScrapeJobData> = {
-                  id: jobId,
-
-                  status: "active",
-                  createdAt: new Date(),
-                  priority: jobPriority,
-                  data: {
-                    url: req.body.url,
-                    mode: "single_urls",
-                    team_id: req.auth.team_id,
-                    scrapeOptions: {
-                      ...req.body,
-                      ...((req.body as any).__experimental_cache
-                        ? {
-                            maxAge: req.body.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
-                          }
-                        : {}),
-                    },
-                    internalOptions: {
-                      teamId: req.auth.team_id,
-                      saveScrapeResultToGCS: process.env
-                        .GCS_FIRE_ENGINE_BUCKET_NAME
-                        ? true
-                        : false,
-                      unnormalizedSourceURL: preNormalizedBody.url,
-                      bypassBilling: isDirectToBullMQ || !shouldBill,
-                      zeroDataRetention,
-                      teamFlags: req.acuc?.flags ?? null,
-                      orgId: req.acuc?.org_id ?? null,
-                      teamConcurrency: req.acuc?.concurrency ?? null,
-                      agentIndexOnly: (req as any).agentIndexOnly ?? false,
-                      threatProtection: threatProtection.policy ?? undefined,
-                    },
-                    skipNuq: true,
-                    origin,
-                    integration: req.body.integration,
-                    billing,
-                    startTime: controllerStartTime,
-                    zeroDataRetention,
-                    apiKeyId: req.acuc?.api_key_id ?? null,
-                    concurrencyLimited: limited,
-                    keylessReserved: reservedKeylessCredits > 0,
-                    requestId: agentRequestId ?? undefined,
-                    logRequestPromise: logRequestPromise,
-                  },
-                };
-
-                const result = await processJobInternal(job);
-
-                setSpanAttributes(waitSpan, {
-                  "wait.success": true,
-                });
-
-                return result ?? null;
+              scrapeOptions: {
+                ...req.body,
+                ...((req.body as any).__experimental_cache
+                  ? {
+                      maxAge: req.body.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
+                    }
+                  : {}),
               },
-            );
+              internalOptions: {
+                teamId: req.auth.team_id,
+                saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME
+                  ? true
+                  : false,
+                unnormalizedSourceURL: preNormalizedBody.url,
+                bypassBilling: isDirectToBullMQ || !shouldBill,
+                zeroDataRetention,
+                teamFlags: req.acuc?.flags ?? null,
+                orgId: req.acuc?.org_id ?? null,
+                teamConcurrency: req.acuc?.concurrency ?? null,
+                agentIndexOnly: (req as any).agentIndexOnly ?? false,
+                threatProtection: threatProtection.policy ?? undefined,
+              },
+              skipNuq: true,
+              origin,
+              integration: req.body.integration,
+              billing,
+              startTime: controllerStartTime,
+              zeroDataRetention,
+              apiKeyId: req.acuc?.api_key_id ?? null,
+              concurrencyLimited: false,
+              requestId: agentRequestId ?? undefined,
+              logRequestPromise: logRequestPromise,
+            },
+          };
 
-            return doc;
-          },
-        );
+          const result = await processJobInternal(job);
+
+          setSpanAttributes(waitSpan, {
+            "wait.success": true,
+          });
+
+          return result ?? null;
+        });
       } catch (e) {
-        if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
-          reconciledKeylessCredits = true;
-          adjustKeylessCredits(req.auth.team_id, -reservedKeylessCredits).catch(
-            () => {},
-          );
-        }
-
         const timeoutErr =
           e instanceof TransportableError && e.code === "SCRAPE_TIMEOUT";
 
@@ -493,28 +402,12 @@ export async function scrapeController(
             error: getErrorContactMessage(id),
           });
         }
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
       }
 
       if (!hasFormatOfType(req.body.formats, "rawHtml")) {
         if (doc && doc.rawHtml) {
           delete doc.rawHtml;
         }
-      }
-
-      if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
-        reconciledKeylessCredits = true;
-        const actualKeylessCredits = doc?.metadata?.creditsUsed ?? 0;
-        adjustKeylessCredits(
-          req.auth.team_id,
-          actualKeylessCredits - reservedKeylessCredits,
-        ).catch(() => {});
-        logKeylessCreditUsage(req.auth.team_id, actualKeylessCredits).catch(
-          () => {},
-        );
       }
 
       const totalRequestTime = new Date().getTime() - middlewareStartTime;

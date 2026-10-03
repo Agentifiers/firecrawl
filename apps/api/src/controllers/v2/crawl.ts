@@ -1,3 +1,5 @@
+// Deployments.ai modification: the crawl group is created in the DynamoDB
+// NuQ (no backend router, no Redis active-crawl marker).
 import { Response } from "express";
 import { config } from "../../config";
 import { v7 as uuidv7 } from "uuid";
@@ -8,12 +10,7 @@ import {
   RequestWithAuth,
   toV0CrawlerOptions,
 } from "./types";
-import {
-  crawlToCrawler,
-  saveCrawl,
-  StoredCrawl,
-  markCrawlActive,
-} from "../../lib/crawl-redis";
+import { crawlToCrawler, saveCrawl, StoredCrawl } from "../../lib/crawl-redis";
 import { _addScrapeJobToBullMQ } from "../../services/queue-jobs";
 import { logger as _logger } from "../../lib/logger";
 import { generateCrawlerOptionsFromPrompt } from "../../scraper/scrapeURL/transformers/llmExtract";
@@ -25,10 +22,7 @@ import {
   formatTypesOf,
 } from "../../lib/key-restriction";
 import { buildPromptWithWebsiteStructure } from "../../lib/map-utils";
-import {
-  crawlGroup,
-  resolveNewGroupBackend,
-} from "../../services/worker/nuq-router";
+import { crawlGroup } from "../../services/worker/nuq";
 import { logRequest } from "../../services/logging/log_job";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
 import { resolveThreatProtection } from "../../lib/threat-protection/request";
@@ -296,21 +290,17 @@ export async function crawlController(
     });
   }
 
-  sc.queueBackend = await resolveNewGroupBackend(sc.team_id);
   await crawlGroup.addGroup(
     id,
     sc.team_id,
     (req.acuc?.flags?.crawlTtlHours ?? 24) * 60 * 60 * 1000,
     {
-      backend: sc.queueBackend,
       maxConcurrency: sc.maxConcurrency,
       delaySeconds: sc.crawlerOptions?.delay,
     },
   );
 
   await saveCrawl(id, sc);
-
-  await markCrawlActive(id);
 
   await _addScrapeJobToBullMQ(
     {

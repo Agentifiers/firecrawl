@@ -1,3 +1,4 @@
+// Deployments.ai modification: RabbitMQ webhook message type removed.
 import { z } from "zod";
 import { webhookSchema } from "./schema";
 import { ExtractResult } from "../../lib/extract/types";
@@ -32,26 +33,6 @@ export type WebhookEventDataMap = {
 };
 
 export type WebhookConfig = z.infer<typeof webhookSchema>;
-
-export type WebhookQueueMessage = {
-  webhook_url: string;
-  payload: {
-    success: boolean;
-    type: string;
-    webhookId: string;
-    id?: string;
-    jobId?: string;
-    data: any;
-    error?: string;
-    metadata?: Record<string, string>;
-  };
-  headers: Record<string, string>;
-  team_id: string;
-  job_id: string;
-  scrape_id: string | null;
-  event: WebhookEvent;
-  timeout_ms: number;
-};
 
 interface WebhookDocument {
   content?: string;

@@ -22,7 +22,6 @@ import { billTeam } from "../../services/billing/credit_billing";
 import { logMap, logRequest } from "../../services/logging/log_job";
 import { performCosineSimilarity } from "../../lib/map-cosine";
 import { logger } from "../../lib/logger";
-import Redis from "ioredis";
 import {
   generateURLSplits,
   queryIndexAtDomainSplitLevel,
@@ -38,7 +37,6 @@ import {
 import { calculateThreatScanCredits } from "../../lib/scrape-billing";
 
 configDotenv();
-const redis = new Redis(config.REDIS_URL!);
 
 // Max Links that "Smart /map" can return
 const MAX_FIRE_ENGINE_RESULTS = 500;
@@ -203,45 +201,22 @@ export async function getMapResults({
       Math.min(MAX_FIRE_ENGINE_RESULTS, limit) / resultsPerPage,
     );
 
-    const cacheKey = `fireEngineMap:${mapUrl}`;
-    const cachedResult = ignoreCache ? null : await redis.get(cacheKey);
-
-    let allResults: any[] = [];
-    let pagePromises: Promise<any>[] = [];
-
-    if (cachedResult) {
-      allResults = JSON.parse(cachedResult);
-    } else {
-      const fetchPage = async (page: number) => {
-        return fireEngineMap(
-          mapUrl,
-          {
-            numResults: resultsPerPage,
-            page: page,
-          },
-          abort,
-        );
-      };
-
-      pagePromises = Array.from({ length: maxPages }, (_, i) =>
-        fetchPage(i + 1),
+    // Deployments.ai: the 48h Redis cache of search-engine map results was
+    // removed with Redis; results are fetched per request.
+    const fetchPage = async (page: number) => {
+      return fireEngineMap(
+        mapUrl,
+        {
+          numResults: resultsPerPage,
+          page: page,
+        },
+        abort,
       );
-      allResults = await Promise.all(pagePromises);
-
-      if (!zeroDataRetention) {
-        await redis.set(
-          cacheKey,
-          JSON.stringify(allResults),
-          "EX",
-          48 * 60 * 60,
-        ); // Cache for 48 hours
-      }
-    }
-
+    };
     // Parallelize sitemap index query with search results
-    const [indexResults, ...searchResults] = await Promise.all([
+    const [indexResults, ...allResults] = await Promise.all([
       queryIndex(url, limit, useIndex, includeSubdomains),
-      ...(cachedResult ? [] : pagePromises),
+      ...Array.from({ length: maxPages }, (_, i) => fetchPage(i + 1)),
     ]);
 
     if (indexResults.length > 0) {
@@ -266,10 +241,6 @@ export async function getMapResults({
       } catch (e) {
         logger.warn("tryGetSitemap threw an error", { error: e });
       }
-    }
-
-    if (!cachedResult) {
-      allResults = searchResults;
     }
 
     mapResults = allResults

@@ -1,3 +1,4 @@
+// Deployments.ai modification: Redis and index-cache mocks removed.
 import { vi } from "vitest";
 
 const { file, bucket, getSavedPayload, setSavedPayload } = vi.hoisted(() => {
@@ -33,12 +34,7 @@ vi.mock("../lib/otel-tracer", () => ({
   setSpanAttributes: vi.fn(),
 }));
 
-vi.mock("../db/connection", () => ({
-  dbIndex: {},
-}));
-
 vi.mock("../db/rpc", () => ({
-  insertOmceJobIfNeeded: vi.fn(),
   queryIndexAtSplitLevel: vi.fn(),
   queryIndexAtDomainSplitLevel: vi.fn(),
   queryOmceSignatures: vi.fn(),
@@ -47,18 +43,6 @@ vi.mock("../db/rpc", () => ({
   queryIndexAtDomainSplitLevelWithMeta: vi.fn(),
   queryDomainPriority: vi.fn(),
 }));
-
-vi.mock("./redis", () => ({
-  redisEvictConnection: {},
-}));
-
-vi.mock("./index-cache", () => ({
-  deriveIndexVariantKey: vi.fn(),
-  upsertCachedIndexEntries: vi.fn(),
-  useIndexCache: false,
-}));
-
-vi.mock("../db/schema", () => ({}));
 
 import { getIndexFromGCS, saveIndexToGCS } from "./index";
 

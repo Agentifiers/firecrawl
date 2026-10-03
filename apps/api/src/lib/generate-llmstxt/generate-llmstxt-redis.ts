@@ -1,5 +1,9 @@
-import { redisEvictConnection } from "../../services/redis";
+// Deployments.ai modification: llms.txt generation status is stored in
+// DynamoDB (`llmstxt#<id>`, sk `status`, 24h) instead of Redis; see
+// ../status-document.ts. Module name and API are upstream's (the unused
+// upstream `updateGeneratedLlmsTxtStatus` helper was dropped).
 import { logger as _logger } from "../logger";
+import { statusDocumentStore } from "../status-document";
 
 interface GenerationData {
   id: string;
@@ -18,66 +22,33 @@ interface GenerationData {
 // TTL of 24 hours
 const GENERATION_TTL = 24 * 60 * 60;
 
+const generations = statusDocumentStore<GenerationData>(
+  "llmstxt",
+  "status",
+  GENERATION_TTL,
+);
+
 export async function saveGeneratedLlmsTxt(
   id: string,
   data: GenerationData,
 ): Promise<void> {
-  _logger.debug("Saving llmstxt generation " + id + " to Redis...");
-  await redisEvictConnection.set(
-    "generation:" + id,
-    JSON.stringify(data),
-    "EX",
-    GENERATION_TTL,
-  );
+  _logger.debug("Saving llmstxt generation " + id + "...");
+  await generations.save(id, data);
 }
 
 export async function getGeneratedLlmsTxt(
   id: string,
 ): Promise<GenerationData | null> {
-  const x = await redisEvictConnection.get("generation:" + id);
-  return x ? JSON.parse(x) : null;
+  return generations.get(id);
 }
 
 export async function updateGeneratedLlmsTxt(
   id: string,
   data: Partial<GenerationData>,
 ): Promise<void> {
-  const current = await getGeneratedLlmsTxt(id);
-  if (!current) return;
-
-  const updatedGeneration = {
-    ...current,
-    ...data,
-  };
-
-  await redisEvictConnection.set(
-    "generation:" + id,
-    JSON.stringify(updatedGeneration),
-    "EX",
-    GENERATION_TTL,
-  );
+  await generations.update(id, current => ({ ...current, ...data }));
 }
 
 export async function getGeneratedLlmsTxtExpiry(id: string): Promise<Date> {
-  const d = new Date();
-  const ttl = await redisEvictConnection.pttl("generation:" + id);
-  d.setMilliseconds(d.getMilliseconds() + ttl);
-  d.setMilliseconds(0);
-  return d;
-}
-
-// Convenience method for status updates
-async function updateGeneratedLlmsTxtStatus(
-  id: string,
-  status: "processing" | "completed" | "failed",
-  generatedText?: string,
-  fullText?: string,
-  error?: string,
-): Promise<void> {
-  const updates: Partial<GenerationData> = { status };
-  if (generatedText !== undefined) updates.generatedText = generatedText;
-  if (fullText !== undefined) updates.fullText = fullText;
-  if (error !== undefined) updates.error = error;
-
-  await updateGeneratedLlmsTxt(id, updates);
+  return generations.expiry(id);
 }

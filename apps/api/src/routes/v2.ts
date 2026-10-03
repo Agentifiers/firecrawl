@@ -3,22 +3,14 @@ import multer from "multer";
 import { config } from "../config";
 import { RateLimiterMode } from "../types";
 import { SEARCH_CREDITS_FEATURE_ID } from "../services/autumn/autumn.service";
-import expressWs from "express-ws";
 import { searchController } from "../controllers/v2/search";
 import { feedbackController } from "../controllers/v2/feedback/controller";
 import { searchFeedbackController } from "../controllers/v2/search-feedback";
 import { scrapeController } from "../controllers/v2/scrape";
-import { keylessEligibilityController } from "../controllers/v2/keyless-eligibility";
 import {
   parseController,
   parseMultipartPayloadMiddleware,
 } from "../controllers/v2/parse";
-import {
-  parseLocalUploadController,
-  parseLocalUploadStorageGuard,
-  parseUploadRefPayloadMiddleware,
-  parseUploadUrlController,
-} from "../controllers/v2/parse-upload";
 import { batchScrapeController } from "../controllers/v2/batch-scrape";
 import { crawlController } from "../controllers/v2/crawl";
 import { crawlParamsPreviewController } from "../controllers/v2/crawl-params-preview";
@@ -30,8 +22,6 @@ import { scrapeStatusController } from "../controllers/v2/scrape-status";
 import { creditUsageController } from "../controllers/v2/credit-usage";
 import { tokenUsageController } from "../controllers/v2/token-usage";
 import { crawlCancelController } from "../controllers/v2/crawl-cancel";
-import { concurrencyCheckController } from "../controllers/v2/concurrency-check";
-import { crawlStatusWSController } from "../controllers/v2/crawl-status-ws";
 import { extractController } from "../controllers/v2/extract";
 import { extractStatusController } from "../controllers/v2/extract-status";
 import {
@@ -43,62 +33,18 @@ import {
   idempotencyMiddleware,
   requestTimingMiddleware,
   wrap,
-  isValidJobId,
   validateJobIdParam,
 } from "./shared";
-import { queueStatusController } from "../controllers/v2/queue-status";
 import { creditUsageHistoricalController } from "../controllers/v2/credit-usage-historical";
 import { tokenUsageHistoricalController } from "../controllers/v2/token-usage-historical";
 import { deprecationMiddleware } from "../lib/deprecations";
 import { agentController } from "../controllers/v2/agent";
 import { agentStatusController } from "../controllers/v2/agent-status";
 import { agentCancelController } from "../controllers/v2/agent-cancel";
-import {
-  browserCreateController,
-  browserExecuteController,
-  browserDeleteController,
-  browserListController,
-  browserWebhookDestroyedController,
-} from "../controllers/v2/browser";
-import {
-  browserReplayController,
-  browserReplayPageController,
-} from "../controllers/v2/browser-replay";
 import { activityController } from "../controllers/v1/activity";
-import {
-  getTeamThreatProtectionController,
-  putTeamThreatProtectionController,
-} from "../controllers/v2/team-threat-protection";
 import { supportProxyController } from "../controllers/v2/support-proxy";
-import { createResearchRouter } from "../controllers/v2/research-proxy";
-import {
-  scrapeInteractController,
-  scrapeStopInteractiveBrowserController,
-} from "../controllers/v2/scrape-browser";
-import {
-  confirmMonitorEmailController,
-  createMonitorController,
-  deleteMonitorController,
-  getMonitorCheckController,
-  getMonitorController,
-  listMonitorChecksController,
-  listMonitorsController,
-  runMonitorController,
-  unsubscribeMonitorEmailController,
-  updateMonitorController,
-} from "../controllers/v2/monitor";
-import {
-  slackChannelsController,
-  slackCommandsController,
-  slackDisconnectController,
-  slackEventsController,
-  slackOAuthCallbackController,
-  slackOAuthStartController,
-  slackStatusController,
-} from "../controllers/v2/slack";
 
 export const v2Router = express.Router();
-expressWs(express()).applyTo(v2Router);
 
 const parseUpload = multer({
   storage: multer.memoryStorage(),
@@ -143,27 +89,24 @@ const parsePayloadMiddleware: express.RequestHandler = (req, res, next) => {
     });
   }
 
-  if (req.body && typeof req.body === "object" && "uploadRef" in req.body) {
-    return parseUploadRefPayloadMiddleware(req as any, res, next);
-  }
-
+  // Deployments.ai: the hosted uploadRef flow (parse-upload.ts, Redis-backed
+  // unparsed-ref quota) is removed; only multipart/form-data is accepted.
   return res.status(400).json({
     success: false,
     code: "BAD_REQUEST",
     error:
-      "Missing file upload. Send multipart/form-data with a 'file' field, or JSON with an 'uploadRef'.",
+      "Missing file upload. Send multipart/form-data with a 'file' field.",
   });
 };
 // Add timing middleware to all v2 routes
 v2Router.use(requestTimingMiddleware("v2"));
 
-// Internal: trusted-proxy (hosted MCP) keyless eligibility probe. Secret-gated
-// inside the controller; no auth middleware.
-v2Router.get("/keyless/eligibility", wrap(keylessEligibilityController));
+// Deployments.ai: /keyless/eligibility is removed (keyless access is
+// hosted-only and its credit ledger lived in Redis).
 
 v2Router.post(
   "/search",
-  authMiddleware(RateLimiterMode.Search, { allowKeyless: true }),
+  authMiddleware(RateLimiterMode.Search),
   countryCheck,
   checkCreditsMiddleware(undefined, SEARCH_CREDITS_FEATURE_ID),
   blocklistMiddleware,
@@ -184,22 +127,8 @@ v2Router.post(
 );
 
 v2Router.post(
-  "/parse/upload-url",
-  authMiddleware(RateLimiterMode.Scrape, { allowKeyless: true }),
-  countryCheck,
-  wrap(parseUploadUrlController),
-);
-
-v2Router.put(
-  "/parse/upload/:uploadId",
-  parseLocalUploadStorageGuard,
-  express.raw({ type: "*/*", limit: "50mb" }),
-  wrap(parseLocalUploadController),
-);
-
-v2Router.post(
   "/parse",
-  authMiddleware(RateLimiterMode.Scrape, { allowKeyless: true }),
+  authMiddleware(RateLimiterMode.Scrape),
   countryCheck,
   checkCreditsMiddleware(1),
   parsePayloadMiddleware,
@@ -208,7 +137,7 @@ v2Router.post(
 
 v2Router.post(
   "/scrape",
-  authMiddleware(RateLimiterMode.Scrape, { allowKeyless: true }),
+  authMiddleware(RateLimiterMode.Scrape),
   countryCheck,
   checkCreditsMiddleware(1),
   scrapeBlocklistMiddleware,
@@ -220,20 +149,6 @@ v2Router.get(
   authMiddleware(RateLimiterMode.CrawlStatus),
   validateJobIdParam,
   wrap(scrapeStatusController),
-);
-
-v2Router.post(
-  "/scrape/:jobId/interact",
-  authMiddleware(RateLimiterMode.BrowserExecute, { allowKeyless: true }),
-  validateJobIdParam,
-  wrap(scrapeInteractController),
-);
-
-v2Router.delete(
-  "/scrape/:jobId/interact",
-  authMiddleware(RateLimiterMode.BrowserExecute, { allowKeyless: true }),
-  validateJobIdParam,
-  wrap(scrapeStopInteractiveBrowserController),
 );
 
 v2Router.post(
@@ -294,22 +209,6 @@ v2Router.delete(
   authMiddleware(RateLimiterMode.CrawlStatus),
   validateJobIdParam,
   wrap(crawlCancelController),
-);
-
-v2Router.ws(
-  "/crawl/:jobId",
-  ((ws: any, req: express.Request, next: (err?: unknown) => void) => {
-    const jobId = Array.isArray(req.params.jobId)
-      ? undefined
-      : req.params.jobId;
-
-    if (!isValidJobId(jobId)) {
-      ws.close(1008, "Invalid job ID");
-      return;
-    }
-    next();
-  }) as any,
-  crawlStatusWSController,
 );
 
 v2Router.get(
@@ -404,17 +303,8 @@ v2Router.get(
   wrap(tokenUsageHistoricalController),
 );
 
-v2Router.get(
-  "/concurrency-check",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(concurrencyCheckController),
-);
-
-v2Router.get(
-  "/team/queue-status",
-  authMiddleware(RateLimiterMode.Account),
-  wrap(queueStatusController),
-);
+// Deployments.ai: /concurrency-check and /team/queue-status are removed
+// (Redis-backed team listings, hosted-only).
 
 v2Router.get(
   "/team/activity",
@@ -422,152 +312,11 @@ v2Router.get(
   wrap(activityController),
 );
 
-v2Router.get(
-  "/team/threat-protection",
-  authMiddleware(RateLimiterMode.Account),
-  wrap(getTeamThreatProtectionController),
-);
+// Deployments.ai: /team/threat-protection is removed (hosted-only team
+// settings API; threat protection is configured per deployment).
 
-v2Router.put(
-  "/team/threat-protection",
-  authMiddleware(RateLimiterMode.Account),
-  wrap(putTeamThreatProtectionController),
-);
-
-v2Router.post(
-  "/monitor",
-  authMiddleware(RateLimiterMode.Crawl),
-  countryCheck,
-  checkCreditsMiddleware(1),
-  blocklistMiddleware,
-  wrap(createMonitorController),
-);
-
-v2Router.get(
-  "/monitor",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(listMonitorsController),
-);
-
-// Public, unauthenticated — token in body is the credential. Registered
-// before /monitor/:monitorId so "email" isn't parsed as a monitor UUID.
-v2Router.post("/monitor/email/confirm", wrap(confirmMonitorEmailController));
-v2Router.post(
-  "/monitor/email/unsubscribe",
-  wrap(unsubscribeMonitorEmailController),
-);
-
-v2Router.get(
-  "/monitor/:monitorId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(getMonitorController),
-);
-
-v2Router.patch(
-  "/monitor/:monitorId",
-  authMiddleware(RateLimiterMode.Crawl),
-  countryCheck,
-  checkCreditsMiddleware(1),
-  blocklistMiddleware,
-  wrap(updateMonitorController),
-);
-
-v2Router.delete(
-  "/monitor/:monitorId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(deleteMonitorController),
-);
-
-v2Router.post(
-  "/monitor/:monitorId/run",
-  authMiddleware(RateLimiterMode.Crawl),
-  countryCheck,
-  checkCreditsMiddleware(1),
-  blocklistMiddleware,
-  wrap(runMonitorController),
-);
-
-v2Router.get(
-  "/monitor/:monitorId/checks",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(listMonitorChecksController),
-);
-
-v2Router.get(
-  "/monitor/:monitorId/checks/:checkId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(getMonitorCheckController),
-);
-
-// Slack integration ("Add to Slack" + /monitor slash command).
-// Public endpoints (OAuth callback, slash command, events) authenticate via the
-// OAuth state nonce / Slack request signature rather than a Firecrawl API key.
-v2Router.post(
-  "/slack/oauth/start",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(slackOAuthStartController),
-);
-v2Router.get("/slack/oauth/callback", wrap(slackOAuthCallbackController));
-v2Router.get(
-  "/slack/status",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(slackStatusController),
-);
-v2Router.get(
-  "/slack/channels",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(slackChannelsController),
-);
-v2Router.delete(
-  "/slack/installation",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(slackDisconnectController),
-);
-v2Router.post("/slack/commands", wrap(slackCommandsController));
-v2Router.post("/slack/events", wrap(slackEventsController));
-
-v2Router.post(
-  ["/browser", "/interact"],
-  authMiddleware(RateLimiterMode.Browser),
-  countryCheck,
-  checkCreditsMiddleware(2),
-  wrap(browserCreateController),
-);
-
-v2Router.get(
-  ["/browser", "/interact"],
-  authMiddleware(RateLimiterMode.BrowserExecute),
-  wrap(browserListController),
-);
-
-v2Router.post(
-  ["/browser/:sessionId/execute", "/interact/:sessionId/execute"],
-  authMiddleware(RateLimiterMode.BrowserExecute),
-  wrap(browserExecuteController),
-);
-
-v2Router.get(
-  ["/browser/:sessionId/replay", "/interact/:sessionId/replay"],
-  authMiddleware(RateLimiterMode.BrowserReplay),
-  wrap(browserReplayController),
-);
-
-v2Router.get(
-  ["/browser/:sessionId/replay/:pageId", "/interact/:sessionId/replay/:pageId"],
-  authMiddleware(RateLimiterMode.BrowserReplay),
-  wrap(browserReplayPageController),
-);
-
-v2Router.delete(
-  ["/browser/:sessionId", "/interact/:sessionId"],
-  authMiddleware(RateLimiterMode.BrowserExecute),
-  wrap(browserDeleteController),
-);
-
-v2Router.post(
-  "/browser/webhook/destroyed",
-  wrap(browserWebhookDestroyedController),
-);
+// Deployments.ai: monitor, Slack and browser/interact routes are removed
+// (hosted-only; their Redis/RabbitMQ state is gone).
 
 // Support agent proxy — forwards to the support-agent service.
 v2Router.post(
@@ -581,16 +330,5 @@ v2Router.post(
   wrap(supportProxyController),
 );
 
-if (config.RESEARCH_PROXY_URL) {
-  v2Router.use(
-    "/search/research",
-    authMiddleware(RateLimiterMode.Research, { allowKeyless: true }),
-    createResearchRouter(),
-  );
-
-  v2Router.use(
-    "/research",
-    authMiddleware(RateLimiterMode.Research),
-    createResearchRouter({ legacy: true }),
-  );
-}
+// Deployments.ai: /search/research and /research (hosted research proxy) are
+// removed.

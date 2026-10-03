@@ -1,4 +1,4 @@
-import { generateURLPermutations } from "./crawl-redis";
+import { generateURLPermutations } from "./crawl-urls";
 
 describe("generateURLPermutations", () => {
   it("generates permutations correctly", () => {

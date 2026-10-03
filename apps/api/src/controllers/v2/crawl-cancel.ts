@@ -1,17 +1,13 @@
+// Deployments.ai modification: cancellation drops the crawl's NuQ backlog
+// (DynamoDB) instead of the Redis concurrency-limited job lists.
 import { Response } from "express";
 import { logger } from "../../lib/logger";
-import {
-  getCrawl,
-  getCrawlJobs,
-  saveCrawl,
-  StoredCrawl,
-} from "../../lib/crawl-redis";
+import { getCrawl, saveCrawl, StoredCrawl } from "../../lib/crawl-redis";
 import * as Sentry from "@sentry/node";
 import { configDotenv } from "dotenv";
 import { RequestWithAuth, scrapeOptions } from "./types";
-import { crawlGroup } from "../../services/worker/nuq-router";
+import { crawlGroup } from "../../services/worker/nuq";
 import { normalizeOwnerId } from "../../lib/owner-id";
-import { removeConcurrencyLimitedJobs } from "../../lib/concurrency-limit";
 configDotenv();
 
 export async function crawlCancelController(
@@ -52,12 +48,7 @@ export async function crawlCancelController(
       logger.error(error);
     }
 
-    if (sc.queueBackend === "fdb") {
-      await crawlGroup.cancelGroup(req.params.jobId);
-    } else {
-      const jobIds = await getCrawlJobs(req.params.jobId);
-      await removeConcurrencyLimitedJobs(sc.team_id, jobIds);
-    }
+    await crawlGroup.cancelGroup(req.params.jobId);
 
     res.json({
       status: "cancelled",

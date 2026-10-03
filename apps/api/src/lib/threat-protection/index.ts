@@ -1,5 +1,4 @@
 import { logger } from "../logger";
-import { fetchGoogleWebRiskVerdict } from "./providers/google-web-risk";
 import { canonicalizeUrl } from "./providers/web-risk/canonicalize";
 import type {
   RawVerdict,
@@ -64,40 +63,26 @@ export interface ThreatCheckContext {
 export { UnsafeDomainBlockedError } from "./error";
 export * from "./types";
 
-const PROVIDER_TIMEOUT_MS = 5000;
-const PROVIDER_ATTEMPTS = 2; // 1 initial + 1 retry
-
 /**
- * Single mode→provider dispatch point. Every provider is a separate module
- * under ./providers exporting `fetch<X>Verdict(url) → RawVerdict`; this
- * switch is the only place that knows which mode maps to which classifier.
- * Deliberately kept as a dispatch even with one live branch — future partner
- * classifiers add a mode + a case here and nothing else changes.
+ * Single mode→provider dispatch point.
+ *
+ * Deployments.ai modification: the Google Web Risk provider kept its threat
+ * lists in Redis and was removed with Redis, so this build has no provider
+ * for "normal" mode; every lookup fails and the org's failurePolicy decides
+ * (fail-open allows, fail-closed blocks). Threat protection is configured
+ * per org in the hosted database and is unreachable without database auth.
  */
 async function fetchProviderVerdict(
   url: string,
   mode: Exclude<ThreatProtectionMode, "off">,
 ): Promise<RawVerdict> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= PROVIDER_ATTEMPTS; attempt++) {
-    try {
-      const signal = AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
-      switch (mode) {
-        case "normal":
-          return await fetchGoogleWebRiskVerdict(url, { signal });
-      }
-    } catch (error) {
-      lastError = error;
-      logger.warn("Threat protection provider lookup failed", {
-        canonicalLog: "threat-protection/provider",
-        url,
-        mode,
-        attempt,
-        error,
-      });
-    }
-  }
-  throw lastError;
+  logger.warn("Threat protection provider lookup failed", {
+    canonicalLog: "threat-protection/provider",
+    url,
+    mode,
+    error: "no threat provider in this build",
+  });
+  throw new Error(`No threat protection provider for mode "${mode}".`);
 }
 
 async function checkUrlFresh(

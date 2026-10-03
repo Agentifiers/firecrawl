@@ -6,11 +6,8 @@ import { crawlStatusController } from "../controllers/v1/crawl-status";
 import { mapController } from "../controllers/v1/map";
 import { RateLimiterMode } from "../types";
 import { SEARCH_CREDITS_FEATURE_ID } from "../services/autumn/autumn.service";
-import expressWs from "express-ws";
-import { crawlStatusWSController } from "../controllers/v1/crawl-status-ws";
 import { crawlCancelController } from "../controllers/v1/crawl-cancel";
 import { scrapeStatusController } from "../controllers/v1/scrape-status";
-import { concurrencyCheckController } from "../controllers/v1/concurrency-check";
 import { batchScrapeController } from "../controllers/v1/batch-scrape";
 import { extractController } from "../controllers/v1/extract";
 import { extractStatusController } from "../controllers/v1/extract-status";
@@ -35,21 +32,19 @@ import {
   validateJobIdParam,
   wrap,
 } from "./shared";
-import { queueStatusController } from "../controllers/v1/queue-status";
 import { creditUsageHistoricalController } from "../controllers/v1/credit-usage-historical";
 
 import { tokenUsageHistoricalController } from "../controllers/v1/token-usage-historical";
 import { deprecationMiddleware } from "../lib/deprecations";
 
 export const v1Router = express.Router();
-expressWs(express()).applyTo(v1Router);
 
 // Add timing middleware to all v1 routes
 v1Router.use(requestTimingMiddleware("v1"));
 
 v1Router.post(
   "/scrape",
-  authMiddleware(RateLimiterMode.Scrape, { allowKeyless: true }),
+  authMiddleware(RateLimiterMode.Scrape),
   countryCheck,
   checkCreditsMiddleware(1),
   scrapeBlocklistMiddleware,
@@ -78,7 +73,7 @@ v1Router.post(
 
 v1Router.post(
   "/search",
-  authMiddleware(RateLimiterMode.Search, { allowKeyless: true }),
+  authMiddleware(RateLimiterMode.Search),
   countryCheck,
   checkCreditsMiddleware(undefined, SEARCH_CREDITS_FEATURE_ID),
   wrap(searchController),
@@ -138,13 +133,8 @@ v1Router.get(
   wrap(scrapeStatusController),
 );
 
-v1Router.get(
-  "/concurrency-check",
-  authMiddleware(RateLimiterMode.CrawlStatus),
-  wrap(concurrencyCheckController),
-);
-
-v1Router.ws("/crawl/:jobId", crawlStatusWSController);
+// Deployments.ai: /concurrency-check, /team/queue-status and the crawl status
+// websocket are removed (Redis-backed team listings, hosted-only).
 
 v1Router.post(
   "/extract",
@@ -248,10 +238,4 @@ v1Router.get(
   "/team/token-usage/historical",
   authMiddleware(RateLimiterMode.Account),
   wrap(tokenUsageHistoricalController),
-);
-
-v1Router.get(
-  "/team/queue-status",
-  authMiddleware(RateLimiterMode.Account),
-  wrap(queueStatusController),
 );

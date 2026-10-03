@@ -30,54 +30,14 @@ const configSchema = z.object({
   FIRECRAWL_DASHBOARD_URL: z.url().default("https://www.firecrawl.dev"),
   SUPPORT_AGENT_URL: z.string().url().optional(),
   SUPPORT_AGENT_VERCEL_BYPASS_SECRET: z.string().optional(),
-  RESEARCH_PROXY_URL: z.string().url().optional(),
 
   // Express
   EXPRESS_TRUST_PROXY: z.coerce.number().optional(),
 
-  // Keyless free tier (scrape/search/interact without an API key, per-IP/day).
-  // Non-negative integers; 0 means "enabled but no budget", unset means "off".
-  KEYLESS_CREDITS_PER_DAY: z.coerce.number().int().nonnegative().optional(),
-  KEYLESS_REQUESTS_PER_DAY: z.coerce.number().int().nonnegative().optional(),
-  // Shared secret that lets a trusted proxy (e.g. the hosted MCP server)
-  // forward the real client IP for keyless rate-limiting via the
-  // `x-firecrawl-keyless-ip` header. Untrusted callers can't override their IP.
-  KEYLESS_PROXY_SECRET: z.string().optional(),
-  // Optional Spur Context API token (https://docs.spur.us/context-api). When
-  // set, keyless requests have their client IP checked against Spur and are
-  // refused if the IP fronts anonymizing/rotating infrastructure (VPN/proxy/
-  // TOR). Unset disables the check entirely (keyless behaves as before).
-  SPUR_API_KEY: z.string().optional(),
-
-  // Threat protection (enterprise domain risk blocking). "normal" mode uses
-  // Google Web Risk. An unset key disables the provider (lookups then fail
-  // per the org's failurePolicy).
-  GOOGLE_WEB_RISK_API_KEY: z.string().optional(),
-  GOOGLE_WEB_RISK_API_URL: z
-    .string()
-    .url()
-    .default("https://webrisk.googleapis.com"),
-  // Google Web Risk Update API sync tuning. ZDR: "normal" mode checks run
-  // against a locally synced hash-prefix database (threatLists:computeDiff)
-  // instead of sending URLs to Google, and verdicts are never persisted.
-  //
-  // Floor for how often threatLists:computeDiff may run per list. Google's
-  // recommendedNextDiff is respected when it is later than this floor.
-  THREAT_LIST_SYNC_MIN_INTERVAL_SECONDS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(60),
-  // A synced threat list older than this is treated as unavailable
-  // (provider-failure semantics → the org's failurePolicy decides).
-  THREAT_LIST_STALENESS_SECONDS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(6 * 60 * 60),
+  // (Deployments.ai: the keyless free tier, Spur check, and Google Web Risk
+  // threat-list provider were removed with Redis; see MODIFICATIONS.md.)
 
   // API Keys & Authentication
-  BULL_AUTH_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().optional(),
   OPENROUTER_API_KEY: z.string().optional(),
@@ -113,13 +73,9 @@ const configSchema = z.object({
   DATABASE_REPLICA_URL: z.string().optional(),
   INDEX_DATABASE_URL: z.string().optional(),
   // (Deployments.ai: the Redis index cache was removed with Redis.)
-  // Negative (miss) caching TTL for index URL->id lookups, in ms. 0 disables
-  // it; the cache then only shields lookups that find data. A positive value
-  // (e.g. 600000 = 10min) also short-circuits repeat lookups for URLs with no
-  // index entry. Kept short so any missed cache-clear self-heals quickly.
-  INDEX_CACHE_NEGATIVE_TTL_MS: z.coerce.number().default(0),
   // Deployments.ai: queue and crawl/extract/research state live in one
-  // DynamoDB table (src/services/dynamo/README.md). The endpoint override is
+  // DynamoDB table (layout: src/services/worker/nuq/keys.ts and
+  // src/lib/crawl-redis.ts). The endpoint override is
   // for DynamoDB Local; production uses the regional endpoint and task role.
   FIRECRAWL_DYNAMODB_TABLE: z.string().optional(),
   FIRECRAWL_DYNAMODB_ENDPOINT: emptyStringAsUndefined(z.url()),
@@ -157,10 +113,6 @@ const configSchema = z.object({
   FIRE_ENGINE_AB_URL: z.string().optional(),
   FIRE_ENGINE_AB_RATE: z.coerce.number().optional(),
   FIRE_ENGINE_AB_MODE: z.enum(["mirror", "split"]).default("mirror"),
-
-  // Indexer
-  INDEXER_RABBITMQ_URL: z.string().optional(),
-  INDEXER_TRAFFIC_SHARE: z.coerce.number().default(0.0),
 
   // ScrapeURL
   SCRAPEURL_AB_HOST: z.string().optional(),
@@ -249,28 +201,7 @@ const configSchema = z.object({
   SLACK_WEBHOOK_URL: z.string().optional(),
   SLACK_ADMIN_WEBHOOK_URL: z.string().optional(),
   DISABLE_WEBHOOK_DELIVERY: z.stringbool().optional(),
-
-  // Slack integration ("Add to Slack" for monitor notifications + /monitor
-  // slash command). Credentials come from the Firecrawl Slack app.
-  SLACK_CLIENT_ID: z.string().optional(),
-  SLACK_CLIENT_SECRET: z.string().optional(),
-  SLACK_SIGNING_SECRET: z.string().optional(),
-  // Bot scopes requested during install. Override only if the Slack app manifest
-  // changes; keep in sync with slack-app-manifest.json.
-  SLACK_OAUTH_SCOPES: z
-    .string()
-    .default(
-      "chat:write,chat:write.public,commands,channels:read,groups:read,team:read,incoming-webhook",
-    ),
-  // Absolute URL Slack redirects back to after authorize. Must exactly match a
-  // Redirect URL configured on the Slack app (e.g.
-  // https://api.firecrawl.dev/v2/slack/oauth/callback).
-  SLACK_OAUTH_REDIRECT_URL: z.string().optional(),
-  // 32-byte key (hex or base64) used to AES-256-GCM encrypt stored bot tokens.
-  // If unset, tokens are stored with a `plain:` prefix (self-hosted only).
-  SLACK_TOKEN_ENCRYPTION_KEY: z.string().optional(),
   ALLOW_LOCAL_WEBHOOKS: z.stringbool().optional(),
-  WEBHOOK_USE_RABBITMQ: z.stringbool().optional(),
 
   // Firecrawl Features
   FIRECRAWL_DEBUG_FILTER_LINKS: z.stringbool().optional(),
@@ -307,7 +238,6 @@ const configSchema = z.object({
 
   // Indexing
   BACKGROUND_INDEX_TEAM_ID: z.string().optional(),
-  PRECRAWL_TEAM_ID: z.string().optional(),
 
   // System
   MAX_CPU: z.coerce.number().default(0.8),

@@ -1,3 +1,4 @@
+// Deployments.ai modification: the webhook queue and insert buffer are gone.
 import { logger as _logger } from "../../lib/logger";
 import { getWebhookConfig } from "./config";
 import { WebhookConfig } from "./types";
@@ -25,9 +26,4 @@ export async function createWebhookSender(params: {
   });
 }
 
-export {
-  getWebhookInsertQueueLength,
-  processWebhookInsertJobs,
-} from "./delivery";
 export { WebhookEvent } from "./types";
-export { shutdownWebhookQueue } from "./queue";

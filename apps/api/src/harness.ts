@@ -1,8 +1,11 @@
+// Deployments.ai modification: the harness no longer manages Postgres,
+// RabbitMQ or FoundationDB containers (the queue and stores live in
+// DynamoDB, configured by FIRECRAWL_DYNAMODB_TABLE/_ENDPOINT), and it runs
+// the NuQ sweeper instead of the prefetch/reconciler/index workers.
 import { config } from "./config";
 import { type ChildProcess, spawn } from "child_process";
-import { existsSync } from "fs";
 import * as net from "net";
-import { basename, join } from "path";
+import { basename } from "path";
 import { HTML_TO_MARKDOWN_PATH } from "./natives";
 
 const childProcesses = new Set<ChildProcess>();
@@ -11,29 +14,6 @@ const stopping = new WeakSet<ChildProcess>(); // processes we're intentionally s
 let IS_DEV = false;
 let restartSignal: AbortController | null = null;
 let shuttingDown = false;
-let nuqPostgresContainer: {
-  containerName: string;
-  containerRuntime: string;
-} | null = null;
-let nuqRabbitMQContainer: {
-  containerName: string;
-  containerRuntime: string;
-} | null = null;
-let fdbContainer: {
-  containerName: string;
-  containerRuntime: string;
-} | null = null;
-
-// Get the monorepo root for both tsx source execution and compiled dist execution.
-// __dirname is available in CommonJS (which this compiles to)
-const SOURCE_MONOREPO_ROOT = join(__dirname, "..", "..", "..");
-const DIST_MONOREPO_ROOT = join(__dirname, "..", "..", "..", "..");
-const MONOREPO_ROOT = existsSync(
-  join(SOURCE_MONOREPO_ROOT, "apps", "nuq-postgres"),
-)
-  ? SOURCE_MONOREPO_ROOT
-  : DIST_MONOREPO_ROOT;
-const NUQ_POSTGRES_PATH = join(MONOREPO_ROOT, "apps", "nuq-postgres");
 
 interface ProcessResult {
   promise: Promise<void>;
@@ -44,23 +24,9 @@ interface Services {
   api?: ProcessResult;
   worker?: ProcessResult;
   nuqWorkers: ProcessResult[];
-  nuqPrefetchWorker?: ProcessResult;
-  nuqReconcilerWorker?: ProcessResult;
+  nuqSweeperWorker?: ProcessResult;
   extractWorker?: ProcessResult;
-  indexWorker?: ProcessResult;
   command?: ProcessResult;
-  nuqPostgres?: {
-    containerName: string;
-    containerRuntime: string;
-  };
-  nuqRabbitMQ?: {
-    containerName: string;
-    containerRuntime: string;
-  };
-  fdb?: {
-    containerName: string;
-    containerRuntime: string;
-  };
 }
 
 const colors = {
@@ -116,21 +82,7 @@ const WORKER_PORT = config.WORKER_PORT;
 const EXTRACT_WORKER_PORT = config.EXTRACT_WORKER_PORT;
 const NUQ_WORKER_START_PORT = config.NUQ_WORKER_START_PORT;
 const NUQ_WORKER_COUNT = config.NUQ_WORKER_COUNT;
-const NUQ_PREFETCH_WORKER_PORT = NUQ_WORKER_START_PORT + NUQ_WORKER_COUNT;
-const NUQ_RECONCILER_WORKER_PORT = NUQ_PREFETCH_WORKER_PORT + 1;
-
-// PostgreSQL credentials (with defaults for backward compatibility)
-const POSTGRES_USER = config.POSTGRES_USER;
-const POSTGRES_PASSWORD = config.POSTGRES_PASSWORD;
-const POSTGRES_DB = config.POSTGRES_DB;
-const POSTGRES_HOST = config.POSTGRES_HOST;
-const POSTGRES_PORT = config.POSTGRES_PORT;
-
-// Shell escape helper to prevent command injection
-function shellEscape(arg: string): string {
-  // Wrap in single quotes and escape any single quotes within
-  return `'${arg.replace(/'/g, "'\\''")}'`;
-}
+const NUQ_SWEEPER_WORKER_PORT = config.NUQ_SWEEPER_WORKER_PORT;
 
 const logger = {
   section(message: string) {
@@ -394,385 +346,6 @@ function terminateProcess(proc: ChildProcess, force: boolean): Promise<void> {
   });
 }
 
-async function detectContainerRuntime(): Promise<string | null> {
-  // Try docker first, then podman
-  for (const runtime of ["docker", "podman"]) {
-    try {
-      const check = execForward(`${runtime}@check`, `${runtime} --version`);
-      await check.promise;
-      return runtime;
-    } catch {
-      // Runtime not available, try next
-    }
-  }
-  return null;
-}
-
-async function isContainerRunning(
-  runtime: string,
-  containerName: string,
-): Promise<boolean> {
-  try {
-    const check = execForward(
-      `${runtime}@ps`,
-      `${runtime} ps -a --filter name=^${containerName}$ --format '{{.Names}}'`,
-    );
-    await check.promise;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function stopAndRemoveContainer(
-  runtime: string,
-  containerName: string,
-): Promise<void> {
-  const isRunning = await isContainerRunning(runtime, containerName);
-  if (isRunning) {
-    logger.info(`Stopping existing container: ${containerName}`);
-    try {
-      const stop = execForward(
-        `${runtime}@stop`,
-        `${runtime} stop ${containerName}`,
-      );
-      await stop.promise;
-    } catch (e) {
-      logger.warn(`Failed to stop container ${containerName}, continuing...`);
-    }
-  }
-
-  // Try to remove the container (whether it was running or not)
-  try {
-    const remove = execForward(
-      `${runtime}@rm`,
-      `${runtime} rm -f ${containerName}`,
-    );
-    await remove.promise;
-  } catch (e) {
-    // Container might not exist, that's fine
-  }
-}
-
-async function buildNuqPostgresImage(runtime: string): Promise<void> {
-  logger.info("Building nuq-postgres Docker image");
-  const build = execForward(
-    `${runtime}@build`,
-    `${runtime} build -t firecrawl-nuq-postgres:latest ${NUQ_POSTGRES_PATH}`,
-  );
-  await build.promise;
-  logger.success("nuq-postgres image built");
-}
-
-async function startNuqPostgresContainer(
-  runtime: string,
-  containerName: string,
-): Promise<void> {
-  logger.info(`Starting PostgreSQL container: ${containerName}`);
-  const start = execForward(
-    `${runtime}@start`,
-    `${runtime} run -d --name ${containerName} -p 5432:5432 -e POSTGRES_PASSWORD=${shellEscape(POSTGRES_PASSWORD)} -e POSTGRES_USER=${shellEscape(POSTGRES_USER)} -e POSTGRES_DB=${shellEscape(POSTGRES_DB)} firecrawl-nuq-postgres:latest`,
-  );
-  await start.promise;
-  logger.success(`PostgreSQL container started: ${containerName}`);
-}
-
-async function waitForPostgres(
-  host: string,
-  port: number,
-  timeoutMs: number = config.HARNESS_STARTUP_TIMEOUT_MS,
-): Promise<void> {
-  logger.info("Waiting for PostgreSQL to be ready...");
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    try {
-      // Try to connect to PostgreSQL using a simple query
-      const { Client } = await import("pg");
-      const client = new Client({
-        host,
-        port,
-        user: POSTGRES_USER,
-        password: POSTGRES_PASSWORD,
-        database: POSTGRES_DB,
-        connectionTimeoutMillis: 2000,
-      });
-
-      await client.connect();
-      await client.query("SELECT 1");
-      await client.end();
-
-      logger.success("PostgreSQL is ready");
-      return;
-    } catch (e) {
-      // Not ready yet, wait and retry
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  }
-
-  throw new Error(`PostgreSQL did not become ready within ${timeoutMs}ms`);
-}
-
-async function setupNuqPostgres(): Promise<Services["nuqPostgres"]> {
-  // If NUQ_DATABASE_URL is already set, respect it (user's explicit choice)
-  if (config.NUQ_DATABASE_URL) {
-    logger.info("NUQ_DATABASE_URL is set, skipping container management");
-    return undefined;
-  }
-
-  // Check if we're running in docker-compose (POSTGRES_HOST is set and not localhost)
-  const isDockerCompose = POSTGRES_HOST !== "localhost";
-
-  if (isDockerCompose) {
-    // Running in docker-compose: construct URL with proper encoding
-    logger.section("Setting up NUQ PostgreSQL connection for docker-compose");
-    const dbUrl = `postgresql://${encodeURIComponent(POSTGRES_USER)}:${encodeURIComponent(POSTGRES_PASSWORD)}@${POSTGRES_HOST}:${POSTGRES_PORT}/${encodeURIComponent(POSTGRES_DB)}`;
-    config.NUQ_DATABASE_URL = dbUrl;
-    config.NUQ_DATABASE_URL_LISTEN = dbUrl;
-    process.env.NUQ_DATABASE_URL = dbUrl;
-    process.env.NUQ_DATABASE_URL_LISTEN = dbUrl;
-    logger.success(
-      "NUQ PostgreSQL connection configured with encoded credentials",
-    );
-    return undefined;
-  }
-
-  // Running locally: manage container
-  logger.section("Setting up NUQ PostgreSQL container");
-
-  const runtime = await detectContainerRuntime();
-  if (!runtime) {
-    throw new Error(
-      "Neither Docker nor Podman found. Please install Docker/Podman or set NUQ_DATABASE_URL manually.",
-    );
-  }
-
-  logger.success(`Using container runtime: ${runtime}`);
-
-  const containerName = "firecrawl-nuq-postgres";
-
-  // Stop and remove any existing container
-  await stopAndRemoveContainer(runtime, containerName);
-
-  // Build the image
-  await buildNuqPostgresImage(runtime);
-
-  // Start the container
-  await startNuqPostgresContainer(runtime, containerName);
-
-  // Wait for PostgreSQL to be ready
-  await waitForPostgres("localhost", 5432);
-
-  // Set environment variables for the services with proper encoding
-  const dbUrl = `postgresql://${encodeURIComponent(POSTGRES_USER)}:${encodeURIComponent(POSTGRES_PASSWORD)}@localhost:5432/${encodeURIComponent(POSTGRES_DB)}`;
-  config.NUQ_DATABASE_URL = dbUrl;
-  config.NUQ_DATABASE_URL_LISTEN = dbUrl;
-  process.env.NUQ_DATABASE_URL = dbUrl;
-  process.env.NUQ_DATABASE_URL_LISTEN = dbUrl;
-
-  logger.success("NUQ PostgreSQL container is ready");
-
-  const containerInfo = {
-    containerName,
-    containerRuntime: runtime,
-  };
-
-  // Store globally for graceful shutdown
-  nuqPostgresContainer = containerInfo;
-
-  return containerInfo;
-}
-
-async function startNuqRabbitMQContainer(
-  runtime: string,
-  containerName: string,
-): Promise<void> {
-  logger.info(`Starting RabbitMQ container: ${containerName}`);
-  const start = execForward(
-    `${runtime}@start`,
-    `${runtime} run -d --name ${containerName} -p 5672:5672 -p 15672:15672 rabbitmq:3-management`,
-  );
-  await start.promise;
-  logger.success(`RabbitMQ container started: ${containerName}`);
-}
-
-async function waitForRabbitMQ(
-  host: string,
-  port: number,
-  timeoutMs: number = config.HARNESS_STARTUP_TIMEOUT_MS,
-): Promise<void> {
-  logger.info("Waiting for RabbitMQ to be ready...");
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    try {
-      // Try to connect to RabbitMQ using amqplib
-      const amqp = await import("amqplib");
-      const connection = await amqp.connect(`amqp://${host}:${port}`, {
-        timeout: 2000,
-      });
-      await connection.close();
-
-      logger.success("RabbitMQ is ready");
-      return;
-    } catch (e) {
-      // Not ready yet, wait and retry
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  }
-
-  throw new Error(`RabbitMQ did not become ready within ${timeoutMs}ms`);
-}
-
-async function setupNuqRabbitMQ(): Promise<Services["nuqRabbitMQ"]> {
-  // If NUQ_RABBITMQ_URL is already set, respect it (user's explicit choice)
-  if (config.NUQ_RABBITMQ_URL) {
-    logger.info("NUQ_RABBITMQ_URL is set, skipping container management");
-    return undefined;
-  }
-
-  // Check if we're running in docker-compose (POSTGRES_HOST is set and not localhost)
-  const isDockerCompose = POSTGRES_HOST !== "localhost";
-
-  if (isDockerCompose) {
-    // Running in docker-compose: RabbitMQ should be configured externally
-    logger.info(
-      "Running in docker-compose, skipping RabbitMQ container management",
-    );
-    return undefined;
-  }
-
-  // Running locally: manage container
-  logger.section("Setting up NUQ RabbitMQ container");
-
-  const runtime = await detectContainerRuntime();
-  if (!runtime) {
-    throw new Error(
-      "Neither Docker nor Podman found. Please install Docker/Podman or set NUQ_RABBITMQ_URL manually.",
-    );
-  }
-
-  logger.success(`Using container runtime: ${runtime}`);
-
-  const containerName = "firecrawl-nuq-rabbitmq";
-
-  // Stop and remove any existing container
-  await stopAndRemoveContainer(runtime, containerName);
-
-  // Start the container (using stock image, no build needed)
-  await startNuqRabbitMQContainer(runtime, containerName);
-
-  // Wait for RabbitMQ to be ready
-  await waitForRabbitMQ("localhost", 5672);
-
-  // Set environment variables for the services
-  const rabbitUrl = "amqp://localhost:5672";
-  config.NUQ_RABBITMQ_URL = rabbitUrl;
-  process.env.NUQ_RABBITMQ_URL = rabbitUrl;
-
-  logger.success("NUQ RabbitMQ container is ready");
-
-  const containerInfo = {
-    containerName,
-    containerRuntime: runtime,
-  };
-
-  // Store globally for graceful shutdown
-  nuqRabbitMQContainer = containerInfo;
-
-  return containerInfo;
-}
-
-const FDB_IMAGE = "foundationdb/foundationdb:7.3.63";
-
-async function waitForFdb(
-  runtime: string,
-  containerName: string,
-  timeoutMs: number = config.HARNESS_STARTUP_TIMEOUT_MS,
-): Promise<void> {
-  logger.info("Waiting for FoundationDB to be ready...");
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const check = execForward(
-        `${runtime}@fdb-status`,
-        `${runtime} exec ${containerName} fdbcli --exec "status minimal"`,
-      );
-      await check.promise;
-      logger.success("FoundationDB is ready");
-      return;
-    } catch (e) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  }
-
-  throw new Error(`FoundationDB did not become ready within ${timeoutMs}ms`);
-}
-
-async function setupFdb(): Promise<Services["fdb"]> {
-  // FDB is only needed when the FDB queue backend is in play
-  if (config.NUQ_BACKEND !== "fdb" && !process.env.NUQ_FDB_TESTS) {
-    return undefined;
-  }
-
-  // If FDB_CLUSTER_FILE is already set, respect it (user's explicit choice)
-  if (config.FDB_CLUSTER_FILE) {
-    logger.info("FDB_CLUSTER_FILE is set, skipping container management");
-    return undefined;
-  }
-
-  logger.section("Setting up FoundationDB container");
-
-  const runtime = await detectContainerRuntime();
-  if (!runtime) {
-    throw new Error(
-      "Neither Docker nor Podman found. Please install Docker/Podman or set FDB_CLUSTER_FILE manually.",
-    );
-  }
-
-  logger.success(`Using container runtime: ${runtime}`);
-
-  const containerName = "firecrawl-fdb";
-  await stopAndRemoveContainer(runtime, containerName);
-
-  const start = execForward(
-    `${runtime}@start`,
-    `${runtime} run -d --name ${containerName} -p 4500:4500 -e FDB_NETWORKING_MODE=host ${FDB_IMAGE}`,
-  );
-  await start.promise;
-
-  await waitForFdb(runtime, containerName);
-
-  // first boot: create the database; only suppress the known "already
-  // configured" failure and surface any real configure error.
-  const configure = execForward(
-    `${runtime}@fdb-configure`,
-    `${runtime} exec ${containerName} sh -c 'out=$(fdbcli --exec "configure new single memory" 2>&1); status=$?; printf "%s\\n" "$out"; if [ "$status" -eq 0 ]; then exit 0; fi; printf "%s\\n" "$out" | grep -Eiq "already.*configured|database.*configured"'`,
-  );
-  await configure.promise;
-
-  // the host-side client needs a cluster file pointing at the published port
-  const { writeFileSync, mkdirSync } = await import("fs");
-  const { tmpdir } = await import("os");
-  const clusterDir = join(tmpdir(), "firecrawl-fdb");
-  mkdirSync(clusterDir, { recursive: true });
-  const clusterFile = join(clusterDir, "fdb.cluster");
-  writeFileSync(clusterFile, "docker:docker@127.0.0.1:4500");
-
-  config.FDB_CLUSTER_FILE = clusterFile;
-  process.env.FDB_CLUSTER_FILE = clusterFile;
-
-  logger.success("FoundationDB container is ready");
-
-  const containerInfo = {
-    containerName,
-    containerRuntime: runtime,
-  };
-  fdbContainer = containerInfo;
-  return containerInfo;
-}
-
 async function installDependencies() {
   logger.section("Installing dependencies");
 
@@ -816,15 +389,6 @@ async function installDependencies() {
 }
 
 async function startServices(command?: string[]): Promise<Services> {
-  // Setup NUQ PostgreSQL container if needed
-  const nuqPostgres = await setupNuqPostgres();
-
-  // Setup NUQ RabbitMQ container if needed
-  const nuqRabbitMQ = await setupNuqRabbitMQ();
-
-  // Setup FoundationDB container if the FDB queue backend is enabled
-  const fdb = await setupFdb();
-
   logger.section("Starting services");
 
   const api = execForward(
@@ -864,61 +428,29 @@ async function startServices(command?: string[]): Promise<Services> {
 
   const nuqWorkers = Array.from({ length: NUQ_WORKER_COUNT }, (_, i) =>
     execForward(
-      `${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}-${i}`,
+      `nuq-worker-${i}`,
       process.argv[2] === "--start-docker"
-        ? `node dist/src/services/worker/${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}.js`
-        : `pnpm ${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}:production`,
+        ? "node dist/src/services/worker/nuq-worker.js"
+        : "pnpm nuq-worker:production",
       {
         NUQ_WORKER_PORT: String(NUQ_WORKER_START_PORT + i),
         NUQ_REDUCE_NOISE: "true",
-        NUQ_POD_NAME: `${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}-${i}`,
+        NUQ_POD_NAME: `nuq-worker-${i}`,
       },
     ),
   );
 
-  const nuqPrefetchWorker =
-    config.NUQ_BACKEND === "fdb"
-      ? undefined
-      : execForward(
-          "nuq-prefetch-worker",
-          process.argv[2] === "--start-docker"
-            ? "node dist/src/services/worker/nuq-prefetch-worker.js"
-            : "pnpm nuq-prefetch-worker:production",
-          {
-            NUQ_PREFETCH_WORKER_PORT: String(NUQ_PREFETCH_WORKER_PORT),
-            NUQ_REDUCE_NOISE: "true",
-            NUQ_POD_NAME: "nuq-prefetch-worker-0",
-            NUQ_PREFETCH_REPLICAS: String(1),
-          },
-        );
-
-  const nuqReconcilerWorker =
-    config.NUQ_BACKEND === "fdb"
-      ? undefined
-      : execForward(
-          "nuq-reconciler",
-          process.argv[2] === "--start-docker"
-            ? "node dist/src/services/worker/nuq-reconciler-worker.js"
-            : "pnpm nuq-reconciler-worker:production",
-          {
-            NUQ_RECONCILER_WORKER_PORT: String(NUQ_RECONCILER_WORKER_PORT),
-            NUQ_REDUCE_NOISE: "true",
-            NUQ_POD_NAME: "nuq-reconciler-worker-0",
-          },
-        );
-
-  const indexWorker = config.USE_DB_AUTHENTICATION
-    ? execForward(
-        "index-worker",
-        process.argv[2] === "--start-docker"
-          ? "node dist/src/services/indexing/index-worker.js"
-          : "pnpm index-worker:production",
-        {
-          NUQ_REDUCE_NOISE: "true",
-          NUQ_POD_NAME: "index-worker",
-        },
-      )
-    : undefined;
+  const nuqSweeperWorker = execForward(
+    "nuq-sweeper",
+    process.argv[2] === "--start-docker"
+      ? "node dist/src/services/worker/nuq-sweeper-worker.js"
+      : "pnpm nuq-sweeper-worker:production",
+    {
+      NUQ_SWEEPER_WORKER_PORT: String(NUQ_SWEEPER_WORKER_PORT),
+      NUQ_REDUCE_NOISE: "true",
+      NUQ_POD_NAME: "nuq-sweeper-worker-0",
+    },
+  );
 
   // tests hammer the API instantly, so we need to ensure it's running before launching tests
   if (
@@ -940,14 +472,9 @@ async function startServices(command?: string[]): Promise<Services> {
     api,
     worker,
     nuqWorkers,
-    nuqPrefetchWorker,
-    nuqReconcilerWorker,
-    indexWorker,
+    nuqSweeperWorker,
     extractWorker,
     command: commandProcess,
-    nuqPostgres,
-    nuqRabbitMQ,
-    fdb,
   };
 }
 
@@ -958,9 +485,7 @@ async function stopDevelopmentServices(services: Services) {
     services.api?.process,
     services.worker?.process,
     ...services.nuqWorkers.map(w => w.process),
-    services.nuqPrefetchWorker?.process,
-    services.nuqReconcilerWorker?.process,
-    services.indexWorker?.process,
+    services.nuqSweeperWorker?.process,
     services.extractWorker?.process,
     services.command?.process,
   ].filter((p): p is ChildProcess => !!p);
@@ -972,26 +497,6 @@ async function stopDevelopmentServices(services: Services) {
       logger.error("Error while stopping processes", e);
     }),
   ]);
-
-  // Stop and remove NUQ PostgreSQL container if it was started by harness
-  if (services.nuqPostgres) {
-    logger.info("Stopping NUQ PostgreSQL container");
-    await stopAndRemoveContainer(
-      services.nuqPostgres.containerRuntime,
-      services.nuqPostgres.containerName,
-    );
-    logger.success("NUQ PostgreSQL container stopped");
-  }
-
-  // Stop and remove NUQ RabbitMQ container if it was started by harness
-  if (services.nuqRabbitMQ) {
-    logger.info("Stopping NUQ RabbitMQ container");
-    await stopAndRemoveContainer(
-      services.nuqRabbitMQ.containerRuntime,
-      services.nuqRabbitMQ.containerName,
-    );
-    logger.success("NUQ RabbitMQ container stopped");
-  }
 }
 
 async function runDevMode(): Promise<void> {
@@ -1127,12 +632,9 @@ async function waitForTermination(services: Services): Promise<void> {
   if (services.command) promises.push(services.command.promise);
   if (services.api) promises.push(services.api.promise);
   if (services.worker) promises.push(services.worker.promise);
-  if (services.indexWorker) promises.push(services.indexWorker.promise);
   if (services.extractWorker) promises.push(services.extractWorker.promise);
-  if (services.nuqPrefetchWorker)
-    promises.push(services.nuqPrefetchWorker.promise);
-  if (services.nuqReconcilerWorker)
-    promises.push(services.nuqReconcilerWorker.promise);
+  if (services.nuqSweeperWorker)
+    promises.push(services.nuqSweeperWorker.promise);
 
   promises.push(...services.nuqWorkers.map(w => w.promise));
 
@@ -1153,40 +655,6 @@ async function gracefulShutdown() {
     terminateProcess(proc, forceTerminate),
   );
   await Promise.allSettled(terminationPromises);
-
-  // Stop and remove NUQ PostgreSQL container if it was started by harness
-  if (nuqPostgresContainer) {
-    logger.info("Stopping NUQ PostgreSQL container");
-    await stopAndRemoveContainer(
-      nuqPostgresContainer.containerRuntime,
-      nuqPostgresContainer.containerName,
-    );
-    logger.success("NUQ PostgreSQL container stopped");
-    nuqPostgresContainer = null;
-  }
-
-  // Stop and remove NUQ RabbitMQ container if it was started by harness
-  if (nuqRabbitMQContainer) {
-    logger.info("Stopping NUQ RabbitMQ container");
-    await stopAndRemoveContainer(
-      nuqRabbitMQContainer.containerRuntime,
-      nuqRabbitMQContainer.containerName,
-    );
-    logger.success("NUQ RabbitMQ container stopped");
-    nuqRabbitMQContainer = null;
-  }
-
-  // Stop and remove FoundationDB container if it was started by harness
-  if (fdbContainer) {
-    logger.info("Stopping FoundationDB container");
-    await stopAndRemoveContainer(
-      fdbContainer.containerRuntime,
-      fdbContainer.containerName,
-    );
-    logger.success("FoundationDB container stopped");
-    fdbContainer = null;
-  }
-
   logger.success("All processes terminated");
 }
 

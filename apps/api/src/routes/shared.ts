@@ -1,3 +1,4 @@
+// Deployments.ai modification: no keyless authentication option.
 import { NextFunction, Request, Response } from "express";
 // import { crawlStatusController } from "../../src/controllers/v1/crawl-status";
 import {
@@ -218,7 +219,6 @@ export function checkCreditsMiddleware(
 
 export function authMiddleware(
   rateLimiterMode: RateLimiterMode,
-  options: { allowKeyless?: boolean } = {},
 ): (req: RequestWithMaybeAuth, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     (async () => {
@@ -234,12 +234,7 @@ export function authMiddleware(
       //   currentRateLimiterMode = RateLimiterMode.ScrapeAgentPreview;
       // }
 
-      const auth = await authenticateUser(
-        req,
-        res,
-        currentRateLimiterMode,
-        options,
-      );
+      const auth = await authenticateUser(req, res, currentRateLimiterMode);
 
       if (!auth.success) {
         if (!res.headersSent) {

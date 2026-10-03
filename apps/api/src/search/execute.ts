@@ -1,3 +1,4 @@
+// Deployments.ai modification: keyless reservation flag removed.
 import type { Logger } from "winston";
 import { search } from "./v2";
 import { SearchV2Response } from "../lib/entities";
@@ -58,7 +59,6 @@ interface SearchContext {
   zeroDataRetention?: boolean;
   billing?: BillingMetadata;
   agentIndexOnly?: boolean;
-  keylessReserved?: boolean;
   /** Effective threat protection policy; blocked domains are removed from results entirely. */
   threatProtectionPolicy?: ThreatProtectionPolicy | null;
 }
@@ -231,7 +231,6 @@ export async function executeSearch(
         requestId,
         billing,
         agentIndexOnly: context.agentIndexOnly,
-        keylessReserved: context.keylessReserved,
         threatProtectionPolicy: threatPolicy ?? null,
       };
 

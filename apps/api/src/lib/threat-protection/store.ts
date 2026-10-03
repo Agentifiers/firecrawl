@@ -1,27 +1,18 @@
+// Deployments.ai modification: the Redis config cache went away with Redis,
+// and the config write path (upsertOrgThreatProtectionConfig) was removed
+// with the hosted-only /v2/team/threat-protection API. The config is read
+// from the database (hosted database auth only).
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, dbRr } from "../../db/connection";
+import { dbRr } from "../../db/connection";
 import * as schema from "../../db/schema";
-import { deleteKey, getValue, setValue } from "../../services/redis";
 import { logger as _logger } from "../logger";
 import {
   THREAT_PROTECTION_POLICY_DEFAULTS,
   type ThreatProtectionPolicy,
 } from "./types";
-import type { ThreatProtectionConfigInput } from "./config";
 
 const logger = _logger.child({ module: "threat-protection-store" });
-
-// Short TTL so config changes apply without a redeploy while keeping the
-// enforcement hot path off Postgres. Invalidated on write.
-//
-// ZDR boundary: this cache (and the team→org map below) stores the org's OWN
-// configuration — never scrape-derived data (no target domains, URLs, or
-// verdicts) — so it is compatible with zero-data-retention requirements and
-// deliberately survives the removal of the verdict cache (ENG-5004).
-const CACHE_TTL_SECONDS = 60;
-
-const cacheKey = (orgId: string) => `threat-protection-config:${orgId}`;
 
 /**
  * Whether an error is Postgres 42P01 (undefined_table) for our config table.
@@ -108,28 +99,11 @@ export function rowToConfig(
 }
 
 /**
- * Reads the org's threat protection config, with a short Redis cache
- * (~60s TTL, negative results included) so the enforcement hot path
- * doesn't hit Postgres per scrape. Invalidated by
- * {@link upsertOrgThreatProtectionConfig}.
+ * Reads the org's threat protection config.
  */
 export async function getOrgThreatProtectionConfig(
   orgId: string,
 ): Promise<OrgThreatProtectionConfig | null> {
-  const key = cacheKey(orgId);
-
-  try {
-    const cached = await getValue(key);
-    if (cached !== null) {
-      return JSON.parse(cached) as OrgThreatProtectionConfig | null;
-    }
-  } catch (error) {
-    logger.warn("Failed to read threat protection config cache", {
-      error,
-      orgId,
-    });
-  }
-
   let rows: ThreatProtectionConfigRow[];
   try {
     rows = await dbRr
@@ -149,64 +123,7 @@ export async function getOrgThreatProtectionConfig(
     }
   }
 
-  const config = rows[0] ? rowToConfig(rows[0]) : null;
-
-  try {
-    await setValue(key, JSON.stringify(config), CACHE_TTL_SECONDS);
-  } catch (error) {
-    logger.warn("Failed to write threat protection config cache", {
-      error,
-      orgId,
-    });
-  }
-
-  return config;
-}
-
-/**
- * Full-document upsert of the org's threat protection config. Invalidates
- * the read cache on success.
- */
-export async function upsertOrgThreatProtectionConfig(
-  orgId: string,
-  config: ThreatProtectionConfigInput,
-): Promise<OrgThreatProtectionConfig> {
-  const values = {
-    org_id: orgId,
-    mode: config.mode,
-    // Everything but the mode lives in the jsonb document.
-    config: {
-      riskScoreThreshold: config.riskScoreThreshold,
-      blacklist: config.blacklist,
-      whitelist: config.whitelist,
-      blockedTlds: config.blockedTlds,
-      failurePolicy: config.failurePolicy,
-      allowRequestOverrides: config.allowRequestOverrides,
-    },
-  };
-
-  const [row] = await db
-    .insert(schema.threat_protection_config)
-    .values(values)
-    .onConflictDoUpdate({
-      target: schema.threat_protection_config.org_id,
-      set: {
-        ...values,
-        updated_at: new Date().toISOString(),
-      },
-    })
-    .returning();
-
-  try {
-    await deleteKey(cacheKey(orgId));
-  } catch (error) {
-    logger.warn("Failed to invalidate threat protection config cache", {
-      error,
-      orgId,
-    });
-  }
-
-  return rowToConfig(row);
+  return rows[0] ? rowToConfig(rows[0]) : null;
 }
 
 /**

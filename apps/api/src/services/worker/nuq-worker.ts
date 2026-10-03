@@ -1,3 +1,4 @@
+// Deployments.ai modification: runs the shared NuQ consumer loop on DynamoDB.
 import "dotenv/config";
 import "../sentry";
 import { setSentryServiceTag } from "../sentry";

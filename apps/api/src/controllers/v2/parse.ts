@@ -19,24 +19,15 @@ import { checkPermissions } from "../../lib/permissions";
 import { withSpan, setSpanAttributes, SpanKind } from "../../lib/otel-tracer";
 import { processJobInternal } from "../../services/worker/scrape-worker";
 import { ScrapeJobData } from "../../types";
-import { teamConcurrencySemaphore } from "../../services/worker/team-semaphore";
-import { getJobPriority } from "../../lib/job-priority";
 import { logRequest } from "../../services/logging/log_job";
 import { getErrorContactMessage } from "../../lib/deployment";
 import { captureExceptionWithZdrCheck } from "../../services/sentry";
 import type { BillingMetadata } from "../../services/billing/types";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
-import {
-  KEYLESS_FREE_TIER_LIMIT_MESSAGE,
-  adjustKeylessCredits,
-  logKeylessCreditUsage,
-  reserveKeylessCredits,
-} from "../../lib/keyless";
-import { projectScrapeCredits } from "../../lib/keyless-credit-projection";
-import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
+// Deployments.ai modification: no Redis team semaphore, job-priority decay or
+// keyless credit reservations; parses run directly at priority 10.
 import path from "node:path";
 
-const AGENT_INTEROP_CONCURRENCY_BOOST = 3;
 const SUPPORTED_PARSE_FILE_TYPES =
   ".html, .htm, .pdf, .docx, .doc, .odt, .rtf, .xlsx, .xls";
 
@@ -354,37 +345,9 @@ export async function parseController(
 
       const shouldBill = req.body.__agentInterop?.shouldBill ?? true;
       const agentRequestId = req.body.__agentInterop?.requestId ?? null;
-      const boostConcurrency =
-        req.body.__agentInterop?.boostConcurrency ?? false;
       const isDirectToBullMQ =
         config.SEARCH_PREVIEW_TOKEN !== undefined &&
         config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
-      const projectedKeylessCredits =
-        shouldBill && !isDirectToBullMQ
-          ? projectScrapeCredits(
-              req.body,
-              req.acuc?.flags ?? null,
-              zeroDataRetention,
-            )
-          : 0;
-      let reservedKeylessCredits = 0;
-      let reconciledKeylessCredits = false;
-
-      if (projectedKeylessCredits > 0) {
-        const reservation = await reserveKeylessCredits(
-          req.auth.team_id,
-          projectedKeylessCredits,
-        );
-        if (!reservation.ok) {
-          applyAgentAuthDiscoveryHeader(res);
-          return res.status(429).json({
-            success: false,
-            error: KEYLESS_FREE_TIER_LIMIT_MESSAGE,
-          });
-        }
-        reservedKeylessCredits = projectedKeylessCredits;
-      }
-
       const logger = _logger.child({
         method: "parseController",
         jobId,
@@ -432,127 +395,75 @@ export async function parseController(
 
       const totalWait = 0;
 
-      let lockTime: number | null = null;
-      let concurrencyLimited = false;
+      const lockTime: number | null = null;
+      const concurrencyLimited = false;
 
-      let timeoutHandle: NodeJS.Timeout | null = null;
       let doc: Document | null = null;
 
       try {
-        const lockStart = Date.now();
-        const aborter = new AbortController();
-        if (timeout) {
-          timeoutHandle = setTimeout(() => {
-            aborter.abort();
-          }, timeout * 0.667);
-        }
-        req.on("close", () => aborter.abort());
+        const { file, ...parseOptions } = req.body;
+        const syntheticFilename = getSyntheticFilename(file);
+        const syntheticUrl = `https://parse.firecrawl.dev/uploads/${encodeURIComponent(syntheticFilename)}`;
+        const forceEngine = getParseForceEngine(file.kind!);
 
-        const baseConcurrency = req.acuc?.concurrency || 1;
-        const concurrency = boostConcurrency
-          ? baseConcurrency * AGENT_INTEROP_CONCURRENCY_BOOST
-          : baseConcurrency;
+        doc = await withSpan("api.parse.wait_for_job", async waitSpan => {
+          setSpanAttributes(waitSpan, {
+            "wait.timeout":
+              timeout !== undefined ? timeout + totalWait : undefined,
+            "wait.job_id": jobId,
+          });
 
-        doc = await teamConcurrencySemaphore.withSemaphore(
-          req.auth.team_id,
-          jobId,
-          concurrency,
-          aborter.signal,
-          timeout ?? 60_000,
-          async limited => {
-            const jobPriority = await getJobPriority({
+          const job: NuQJob<ScrapeJobData> = {
+            id: jobId,
+            status: "active",
+            createdAt: new Date(),
+            priority: 10,
+            data: {
+              url: syntheticUrl,
+              mode: "single_urls",
               team_id: req.auth.team_id,
-              basePriority: 10,
-            });
-
-            lockTime = Date.now() - lockStart;
-            concurrencyLimited = limited;
-
-            logger.debug(`Lock acquired for team: ${req.auth.team_id}`, {
-              teamId: req.auth.team_id,
-              lockTime,
-              limited,
-            });
-
-            const { file, ...parseOptions } = req.body;
-            const syntheticFilename = getSyntheticFilename(file);
-            const syntheticUrl = `https://parse.firecrawl.dev/uploads/${encodeURIComponent(syntheticFilename)}`;
-            const forceEngine = getParseForceEngine(file.kind!);
-
-            const doc = await withSpan(
-              "api.parse.wait_for_job",
-              async waitSpan => {
-                setSpanAttributes(waitSpan, {
-                  "wait.timeout":
-                    timeout !== undefined ? timeout + totalWait : undefined,
-                  "wait.job_id": jobId,
-                });
-
-                const job: NuQJob<ScrapeJobData> = {
-                  id: jobId,
-                  status: "active",
-                  createdAt: new Date(),
-                  priority: jobPriority,
-                  data: {
-                    url: syntheticUrl,
-                    mode: "single_urls",
-                    team_id: req.auth.team_id,
-                    scrapeOptions: {
-                      ...parseOptions,
-                      maxAge: 0,
-                      storeInCache: false,
-                    },
-                    internalOptions: {
-                      teamId: req.auth.team_id,
-                      saveScrapeResultToGCS: process.env
-                        .GCS_FIRE_ENGINE_BUCKET_NAME
-                        ? true
-                        : false,
-                      unnormalizedSourceURL: file.filename,
-                      bypassBilling: isDirectToBullMQ || !shouldBill,
-                      zeroDataRetention,
-                      teamFlags: req.acuc?.flags ?? null,
-                      orgId: req.acuc?.org_id ?? null,
-                      teamConcurrency: req.acuc?.concurrency ?? null,
-                      uploadedFile: file,
-                      forceEngine,
-                      isParse: true,
-                      agentIndexOnly: (req as any).agentIndexOnly ?? false,
-                    },
-                    skipNuq: true,
-                    origin,
-                    integration: req.body.integration,
-                    billing,
-                    startTime: controllerStartTime,
-                    zeroDataRetention,
-                    apiKeyId: req.acuc?.api_key_id ?? null,
-                    concurrencyLimited: limited,
-                    keylessReserved: reservedKeylessCredits > 0,
-                    requestId: agentRequestId ?? undefined,
-                  },
-                };
-
-                const result = await processJobInternal(job);
-
-                setSpanAttributes(waitSpan, {
-                  "wait.success": true,
-                });
-
-                return result ?? null;
+              scrapeOptions: {
+                ...parseOptions,
+                maxAge: 0,
+                storeInCache: false,
               },
-            );
+              internalOptions: {
+                teamId: req.auth.team_id,
+                saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME
+                  ? true
+                  : false,
+                unnormalizedSourceURL: file.filename,
+                bypassBilling: isDirectToBullMQ || !shouldBill,
+                zeroDataRetention,
+                teamFlags: req.acuc?.flags ?? null,
+                orgId: req.acuc?.org_id ?? null,
+                teamConcurrency: req.acuc?.concurrency ?? null,
+                uploadedFile: file,
+                forceEngine,
+                isParse: true,
+                agentIndexOnly: (req as any).agentIndexOnly ?? false,
+              },
+              skipNuq: true,
+              origin,
+              integration: req.body.integration,
+              billing,
+              startTime: controllerStartTime,
+              zeroDataRetention,
+              apiKeyId: req.acuc?.api_key_id ?? null,
+              concurrencyLimited: false,
+              requestId: agentRequestId ?? undefined,
+            },
+          };
 
-            return doc;
-          },
-        );
+          const result = await processJobInternal(job);
+
+          setSpanAttributes(waitSpan, {
+            "wait.success": true,
+          });
+
+          return result ?? null;
+        });
       } catch (e) {
-        if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
-          reconciledKeylessCredits = true;
-          adjustKeylessCredits(req.auth.team_id, -reservedKeylessCredits).catch(
-            () => {},
-          );
-        }
-
         const timeoutErr =
           e instanceof TransportableError && e.code === "SCRAPE_TIMEOUT";
 
@@ -645,28 +556,12 @@ export async function parseController(
             error: getErrorContactMessage(id),
           });
         }
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
       }
 
       if (!hasFormatOfType(req.body.formats, "rawHtml")) {
         if (doc && doc.rawHtml) {
           delete doc.rawHtml;
         }
-      }
-
-      if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
-        reconciledKeylessCredits = true;
-        const actualKeylessCredits = doc?.metadata?.creditsUsed ?? 0;
-        adjustKeylessCredits(
-          req.auth.team_id,
-          actualKeylessCredits - reservedKeylessCredits,
-        ).catch(() => {});
-        logKeylessCreditUsage(req.auth.team_id, actualKeylessCredits).catch(
-          () => {},
-        );
       }
 
       const totalRequestTime = new Date().getTime() - middlewareStartTime;

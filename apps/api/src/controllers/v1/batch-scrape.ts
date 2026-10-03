@@ -14,11 +14,9 @@ import {
   finishCrawlKickoff,
   getCrawl,
   lockURLs,
-  markCrawlActive,
   saveCrawl,
   StoredCrawl,
 } from "../../lib/crawl-redis";
-import { getJobPriority } from "../../lib/job-priority";
 import { addScrapeJobs } from "../../services/queue-jobs";
 import { createWebhookSender, WebhookEvent } from "../../services/webhook";
 import { logger as _logger } from "../../lib/logger";
@@ -38,10 +36,7 @@ import {
   checkKeyFormatRestriction,
   formatTypesOf,
 } from "../../lib/key-restriction";
-import {
-  crawlGroup,
-  resolveNewGroupBackend,
-} from "../../services/worker/nuq-router";
+import { crawlGroup } from "../../services/worker/nuq";
 import { logRequest } from "../../services/logging/log_job";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
 
@@ -276,32 +271,21 @@ export async function batchScrapeController(
   }
 
   if (!req.body.appendToId) {
-    sc.queueBackend = await resolveNewGroupBackend(sc.team_id);
     await crawlGroup.addGroup(
       id,
       sc.team_id,
       (req.acuc?.flags?.crawlTtlHours ?? 24) * 60 * 60 * 1000,
       {
-        backend: sc.queueBackend,
         maxConcurrency: sc.maxConcurrency,
         delaySeconds: sc.crawlerOptions?.delay,
       },
     );
     await saveCrawl(id, sc);
-    await markCrawlActive(id);
   }
 
-  let jobPriority = 20;
-
-  // If it is over 1000, we need to get the job priority,
-  // otherwise we can use the default priority of 20
-  if (urls.length > 1000) {
-    // set base to 21
-    jobPriority = await getJobPriority({
-      team_id: req.auth.team_id,
-      basePriority: 21,
-    });
-  }
+  // Deployments.ai modification: upstream's Redis-backed per-team priority
+  // decay is gone; large batches keep the lower static priority.
+  const jobPriority = urls.length > 1000 ? 21 : 20;
   logger.debug("Using job priority " + jobPriority, { jobPriority });
   const billing = { endpoint: "batch_scrape" as const, jobId: id };
 

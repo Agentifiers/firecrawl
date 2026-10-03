@@ -28,15 +28,6 @@ RUN apt-get update && apt-get install -y \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# FoundationDB client library (libfdb_c + headers), needed by the
-# `foundationdb` npm package at install time on arches without prebuilds
-ARG FDB_VERSION=7.3.63
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in arm64) FDB_ARCH=aarch64 ;; *) FDB_ARCH=$ARCH ;; esac && \
-    curl -fsSL -o /tmp/fdb-clients.deb \
-      "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${FDB_ARCH}.deb" && \
-    dpkg -i /tmp/fdb-clients.deb && rm /tmp/fdb-clients.deb
-
 # Install Rust
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -64,7 +55,7 @@ COPY apps/api ./
 RUN rm -rf dist && pnpm run build
 ARG GIT_SHA=unknown
 RUN test -s dist/src/harness.js && \
-    test -s dist/src/controllers/v0/crawl-status.js && \
+    test -s dist/src/services/worker/nuq-sweeper-worker.js && \
     printf '%s\n' "$GIT_SHA" > BUILD_SHA
 
 # Remove dev dependencies
@@ -79,14 +70,6 @@ RUN apt-get update && apt-get install -y \
     procps \
     curl \
     && rm -rf /var/lib/apt/lists/*
-
-# FoundationDB client library (libfdb_c + fdbcli)
-ARG FDB_VERSION=7.3.63
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in arm64) FDB_ARCH=aarch64 ;; *) FDB_ARCH=$ARCH ;; esac && \
-    curl -fsSL -o /tmp/fdb-clients.deb \
-      "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${FDB_ARCH}.deb" && \
-    dpkg -i /tmp/fdb-clients.deb && rm /tmp/fdb-clients.deb
 
 EXPOSE 8080
 WORKDIR /app
@@ -103,6 +86,6 @@ COPY LICENSE NOTICE MODIFICATIONS.md ./
 # Copy Go shared library
 COPY --from=go-build /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so ./sharedLibs/go-html-to-md/
 
-RUN node -e 'const fs = require("fs"); for (const p of ["dist/src/harness.js", "dist/src/controllers/v0/crawl-status.js", "BUILD_SHA"]) { if (!fs.statSync(p).size) throw new Error(`${p} missing or empty`); }'
+RUN node -e 'const fs = require("fs"); for (const p of ["dist/src/harness.js", "dist/src/services/worker/nuq-sweeper-worker.js", "BUILD_SHA"]) { if (!fs.statSync(p).size) throw new Error(`${p} missing or empty`); }'
 
 CMD ["node", "dist/src/harness.js", "--start-docker"]

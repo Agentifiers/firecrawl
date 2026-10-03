@@ -1,3 +1,5 @@
+// Deployments.ai modification: analysisPrompt is optional, as the request
+// schema delivers it.
 import { Logger } from "winston";
 import {
   DeepResearchActivity,
@@ -289,7 +291,7 @@ export class ResearchLLMService {
     topic: string,
     findings: DeepResearchFinding[],
     summaries: string[],
-    analysisPrompt: string,
+    analysisPrompt: string | undefined,
     costTracking: CostTracking,
     metadata: { teamId: string; functionId?: string; deepResearchId?: string },
     formats?: string[],

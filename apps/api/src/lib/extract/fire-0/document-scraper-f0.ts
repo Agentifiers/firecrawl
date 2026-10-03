@@ -8,10 +8,9 @@ import {
 } from "../../../controllers/v2/types";
 import { waitForJob } from "../../../services/queue-jobs";
 import { addScrapeJob } from "../../../services/queue-jobs";
-import { getJobPriority } from "../../job-priority";
 import type { Logger } from "winston";
 import { isUrlBlocked } from "../../../scraper/WebScraper/utils/blocklist";
-import { scrapeQueue } from "../../../services/worker/nuq-router";
+import { scrapeQueue } from "../../../services/worker/nuq";
 import type { ThreatProtectionPolicy } from "../../threat-protection/types";
 
 interface ScrapeDocumentOptions {
@@ -52,10 +51,9 @@ export async function scrapeDocument_F0(
 
   async function attemptScrape(timeout: number) {
     const jobId = uuidv7();
-    const jobPriority = await getJobPriority({
-      team_id: options.teamId,
-      basePriority: 10,
-    });
+    // Deployments.ai: per-team priority demotion (Redis job-priority sets)
+    // was removed with Redis; jobs use the base priority.
+    const jobPriority = 10;
 
     const scrapeOptions = scrapeOptionsSchema.parse({
       ...internalScrapeOptions,
@@ -85,7 +83,6 @@ export async function scrapeDocument_F0(
       jobId,
       jobPriority,
       false,
-      true,
     );
 
     const doc = await waitForJob(jobId, timeout, false, logger);

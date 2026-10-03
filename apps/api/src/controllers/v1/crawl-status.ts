@@ -1,3 +1,4 @@
+// Deployments.ai modification: queue reads go to the DynamoDB NuQ.
 import { Response } from "express";
 import { config } from "../../config";
 import {
@@ -28,7 +29,7 @@ import {
   NuQJob,
   NuQJobStatus,
   crawlGroup,
-} from "../../services/worker/nuq-router";
+} from "../../services/worker/nuq";
 import { ScrapeJobSingleUrls } from "../../types";
 configDotenv();
 

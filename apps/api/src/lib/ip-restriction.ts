@@ -2,21 +2,12 @@ import { BlockList, isIP } from "node:net";
 import { eq } from "drizzle-orm";
 import { dbRr } from "../db/connection";
 import * as schema from "../db/schema";
-import { deleteKey, getValue, setValue } from "../services/redis";
 import { logger } from "./logger";
 import type { TeamFlags } from "../controllers/v1/types";
 
-// Propagation delay for dashboard edits to ip_restriction_config.
-const ALLOWLIST_CACHE_TTL_SECONDS = 60;
-
-const allowlistCacheKey = (teamId: string) =>
-  `ip-restriction-allowlist:${teamId}`;
-
-// Invalidates the cached allowlist so dashboard edits apply immediately
-// (admin route ip-restriction-cache-clear).
-export async function clearIpRestrictionCache(teamId: string): Promise<void> {
-  await deleteKey(allowlistCacheKey(teamId));
-}
+// Deployments.ai modification: the allowlist is read from the database on
+// each check; its Redis cache (and the cache-clear helper used only by the
+// removed admin routes) went away with Redis.
 
 // Express hands IPv4 clients back as IPv4-mapped IPv6 (::ffff:1.2.3.4) when
 // the socket is dual-stack; compare in IPv4 form so allowlist entries match.
@@ -65,28 +56,6 @@ export function isIpAllowed(rawIp: string, allowedIps: string[]): boolean {
 }
 
 async function getTeamAllowedIps(teamId: string): Promise<string[]> {
-  const cacheKey = allowlistCacheKey(teamId);
-
-  try {
-    const cached = await getValue(cacheKey);
-    if (cached !== null) {
-      const parsed = JSON.parse(cached);
-      // A corrupted-but-parseable cache entry must not reach the matcher;
-      // treat anything that isn't a string array as a cache miss.
-      if (Array.isArray(parsed)) {
-        return parsed.filter((x): x is string => typeof x === "string");
-      }
-      logger.warn("Ignoring malformed IP restriction allowlist cache entry", {
-        teamId,
-      });
-    }
-  } catch (error) {
-    logger.warn("Failed to read IP restriction allowlist cache", {
-      teamId,
-      error,
-    });
-  }
-
   const [row] = await dbRr
     .select({ allowed_ips: schema.ip_restriction_config.allowed_ips })
     .from(schema.ip_restriction_config)
@@ -98,16 +67,6 @@ async function getTeamAllowedIps(teamId: string): Promise<string[]> {
         (x): x is string => typeof x === "string",
       )
     : [];
-
-  try {
-    await setValue(
-      cacheKey,
-      JSON.stringify(allowedIps),
-      ALLOWLIST_CACHE_TTL_SECONDS,
-    );
-  } catch (error) {
-    logger.warn("Failed to cache IP restriction allowlist", { teamId, error });
-  }
 
   return allowedIps;
 }

@@ -2,7 +2,6 @@ import { v7 as uuidv7 } from "uuid";
 import type { Logger } from "winston";
 import { Document, ScrapeOptions, TeamFlags } from "../controllers/v2/types";
 import { CostTracking } from "../lib/cost-tracking";
-import { getJobPriority } from "../lib/job-priority";
 import { isUrlBlocked } from "../scraper/WebScraper/utils/blocklist";
 import { NuQJob } from "../services/worker/nuq";
 import { processJobInternal } from "../services/worker/scrape-worker";
@@ -41,7 +40,6 @@ interface ScrapeSearchOptions {
   requestId?: string;
   billing?: BillingMetadata;
   agentIndexOnly?: boolean;
-  keylessReserved?: boolean;
   threatProtectionPolicy?: ThreatProtectionPolicy | null;
 }
 
@@ -93,7 +91,6 @@ async function scrapeSearchResultDirect(
         startTime: Date.now(),
         zeroDataRetention,
         apiKeyId: options.apiKeyId,
-        keylessReserved: options.keylessReserved ?? false,
         requestId: options.requestId,
         billing: options.billing,
       },
@@ -218,10 +215,9 @@ export async function scrapeSearchResults(
     return [];
   }
 
-  const jobPriority = await getJobPriority({
-    team_id: options.teamId,
-    basePriority: 10,
-  });
+  // Deployments.ai: per-team priority demotion (Redis job-priority sets)
+  // was removed with Redis; jobs use the base priority.
+  const jobPriority = 10;
 
   logger.info(`Starting ${items.length} concurrent scrapes for search results`);
 

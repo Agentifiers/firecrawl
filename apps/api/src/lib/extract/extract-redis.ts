@@ -1,6 +1,9 @@
-import { redisEvictConnection } from "../../services/redis";
+// Deployments.ai modification: extract status and results are stored in
+// DynamoDB (`extract#<id>`, sk `status` for 6h and `result` for 24h) instead
+// of Redis; see ../status-document.ts. Module name and API are upstream's.
 import { logger as _logger } from "../logger";
 import { CostTracking } from "../cost-tracking";
+import { statusDocumentStore } from "../status-document";
 
 export enum ExtractStep {
   INITIAL = "initial",
@@ -45,122 +48,62 @@ type StoredExtract = {
 
 // Reduce TTL to 6 hours instead of 24
 const EXTRACT_TTL = 6 * 60 * 60;
+// Result data storage (fallback when GCS is not configured)
+const EXTRACT_RESULT_TTL = 24 * 60 * 60; // 24 hours
 
 const STEPS_MAX_DISCOVERED_LINKS = 100;
 
+const extracts = statusDocumentStore<StoredExtract>("extract", "status", EXTRACT_TTL);
+const results = statusDocumentStore<unknown>("extract", "result", EXTRACT_RESULT_TTL);
+
+function minimalSteps(steps: ExtractedStep[] | undefined) {
+  return steps?.map(step => ({
+    step: step.step,
+    startedAt: step.startedAt,
+    finishedAt: step.finishedAt,
+    error: step.error,
+    discoveredLinks: step.discoveredLinks?.slice(0, STEPS_MAX_DISCOVERED_LINKS),
+  }));
+}
+
 export async function saveExtract(id: string, extract: StoredExtract) {
-  _logger.debug("Saving extract " + id + " to Redis...");
+  _logger.debug("Saving extract " + id + "...");
   // Only store essential data
-  const minimalExtract = {
-    ...extract,
-    steps: extract.steps?.map(step => ({
-      step: step.step,
-      startedAt: step.startedAt,
-      finishedAt: step.finishedAt,
-      error: step.error,
-      // Only store first 20 discovered links per step
-      discoveredLinks: step.discoveredLinks?.slice(
-        0,
-        STEPS_MAX_DISCOVERED_LINKS,
-      ),
-    })),
-  };
-  await redisEvictConnection.set(
-    "extract:" + id,
-    JSON.stringify(minimalExtract),
-    "EX",
-    EXTRACT_TTL,
-  );
+  await extracts.save(id, { ...extract, steps: minimalSteps(extract.steps) });
 }
 
 export async function getExtract(id: string): Promise<StoredExtract | null> {
-  const x = await redisEvictConnection.get("extract:" + id);
-  return x ? JSON.parse(x) : null;
+  return extracts.get(id);
 }
 
 export async function updateExtract(
   id: string,
   extract: Partial<StoredExtract>,
 ) {
-  const current = await getExtract(id);
-  if (!current) return;
-
-  // Handle steps aggregation with cleanup
-  if (extract.steps && current.steps) {
-    // Keep only the last 5 steps to prevent unbounded growth
-    const allSteps = [...current.steps, ...extract.steps];
-    extract.steps = allSteps.slice(Math.max(0, allSteps.length - 5));
-  }
-
-  // Limit links in steps to 20 instead of 100 to reduce memory usage
-  if (extract.steps) {
-    extract.steps = extract.steps.map(step => {
-      if (
-        step.discoveredLinks &&
-        step.discoveredLinks.length > STEPS_MAX_DISCOVERED_LINKS
-      ) {
-        return {
-          ...step,
-          discoveredLinks: step.discoveredLinks.slice(
-            0,
-            STEPS_MAX_DISCOVERED_LINKS,
-          ),
-        };
-      }
-      return step;
-    });
-  }
-
-  const minimalExtract = {
-    ...current,
-    ...extract,
-    steps: extract.steps?.map(step => ({
-      step: step.step,
-      startedAt: step.startedAt,
-      finishedAt: step.finishedAt,
-      error: step.error,
-      discoveredLinks: step.discoveredLinks?.slice(
-        0,
-        STEPS_MAX_DISCOVERED_LINKS,
-      ),
-    })),
-  };
-
-  console.log(minimalExtract.sessionIds);
-
-  await redisEvictConnection.set(
-    "extract:" + id,
-    JSON.stringify(minimalExtract),
-    "EX",
-    EXTRACT_TTL,
-  );
+  await extracts.update(id, current => {
+    // Keep only the last 5 steps to prevent unbounded growth. The caller's
+    // patch is not mutated, so a conflicting update can be re-merged.
+    let steps = extract.steps;
+    if (steps && current.steps) {
+      const allSteps = [...current.steps, ...steps];
+      steps = allSteps.slice(Math.max(0, allSteps.length - 5));
+    }
+    return { ...current, ...extract, steps: minimalSteps(steps) };
+  });
 }
 
 export async function getExtractExpiry(id: string): Promise<Date> {
-  const d = new Date();
-  const ttl = await redisEvictConnection.pttl("extract:" + id);
-  d.setMilliseconds(d.getMilliseconds() + ttl);
-  d.setMilliseconds(0);
-  return d;
+  return extracts.expiry(id);
 }
-
-// Result data storage (fallback when GCS is not configured)
-const EXTRACT_RESULT_TTL = 24 * 60 * 60; // 24 hours
 
 export async function saveExtractResult(
   id: string,
   result: any,
 ): Promise<void> {
-  _logger.debug("Saving extract result " + id + " to Redis...");
-  await redisEvictConnection.set(
-    "extract_result:" + id,
-    JSON.stringify(result),
-    "EX",
-    EXTRACT_RESULT_TTL,
-  );
+  _logger.debug("Saving extract result " + id + "...");
+  await results.save(id, result);
 }
 
 export async function getExtractResult(id: string): Promise<any | null> {
-  const x = await redisEvictConnection.get("extract_result:" + id);
-  return x ? JSON.parse(x) : null;
+  return results.get(id);
 }

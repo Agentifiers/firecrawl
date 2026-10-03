@@ -6,16 +6,9 @@ import * as Sentry from "@sentry/node";
 import express, { NextFunction, Request, Response } from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
-import {
-  getGenerateLlmsTxtQueue,
-  getDeepResearchQueue,
-  getBillingQueue,
-  getPrecrawlQueue,
-} from "./services/queue-service";
 import { v0Router } from "./routes/v0";
 import os from "os";
 import { logger } from "./lib/logger";
-import { adminRouter } from "./routes/admin";
 import http from "node:http";
 import https from "node:https";
 import { v1Router } from "./routes/v1";
@@ -37,12 +30,6 @@ import { initializeBlocklist } from "./scraper/WebScraper/utils/blocklist";
 import { warmExchangeCatalog } from "./lib/exchange";
 import { initializeEngineForcing } from "./scraper/WebScraper/utils/engine-forcing";
 import responseTime from "response-time";
-import { shutdownWebhookQueue } from "./services/webhook";
-import { shutdownIndexerQueue } from "./services/indexing/indexer-queue";
-
-const { createBullBoard } = require("@bull-board/api");
-const { BullMQAdapter } = require("@bull-board/api/bullMQAdapter");
-const { ExpressAdapter } = require("@bull-board/express");
 
 const numCPUs = config.ENV === "local" ? 2 : os.cpus().length;
 logger.info(`Number of CPUs: ${numCPUs} available`);
@@ -90,24 +77,8 @@ if (config.EXPRESS_TRUST_PROXY) {
   app.set("trust proxy", config.EXPRESS_TRUST_PROXY);
 }
 
-const serverAdapter = new ExpressAdapter();
-
-const { addQueue, removeQueue, setQueues, replaceQueues } = createBullBoard({
-  queues: [
-    new BullMQAdapter(getGenerateLlmsTxtQueue()),
-    new BullMQAdapter(getDeepResearchQueue()),
-    new BullMQAdapter(getBillingQueue()),
-    new BullMQAdapter(getPrecrawlQueue()),
-  ],
-  serverAdapter: serverAdapter,
-});
-
-if (config.BULL_AUTH_KEY) {
-  serverAdapter.setBasePath(`/admin/${config.BULL_AUTH_KEY}/queues`);
-  app.use(`/admin/${config.BULL_AUTH_KEY}/queues`, serverAdapter.getRouter());
-} else {
-  logger.warn("BULL_AUTH_KEY is not set; admin routes are disabled.");
-}
+// Deployments.ai: Bull Board (and the BullMQ queues it constructed at boot) and
+// the hosted admin router are removed.
 
 app.get("/", (_, res) => {
   res.json({
@@ -124,7 +95,6 @@ app.get("/e2e-test", (_, res) => {
 app.use(v0Router);
 app.use("/v1", v1Router);
 app.use("/v2", v2Router);
-app.use(adminRouter);
 
 const DEFAULT_PORT = config.PORT;
 const HOST = config.HOST;
@@ -163,12 +133,8 @@ async function startServer(port = DEFAULT_PORT) {
     server.close(() => {
       logger.info("Server closed.");
       nuqShutdown().finally(() => {
-        shutdownWebhookQueue().finally(() => {
-          shutdownIndexerQueue().finally(() => {
-            logger.info("NUQ shutdown complete");
-            process.exit(0);
-          });
-        });
+        logger.info("NUQ shutdown complete");
+        process.exit(0);
       });
     });
   };

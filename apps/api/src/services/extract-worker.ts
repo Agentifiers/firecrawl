@@ -1,3 +1,6 @@
+// Deployments.ai modification: consumes the DynamoDB `extract` NuQ queue
+// instead of RabbitMQ. A crashed job is failed by the NuQ sweeper (the
+// former dead-letter consumer) after its single allowed stall.
 import "dotenv/config";
 import { config } from "../config";
 import "./sentry";
@@ -14,23 +17,14 @@ import { getErrorContactMessage } from "../lib/deployment";
 import { TransportableError } from "../lib/error";
 import { initializeBlocklist } from "../scraper/WebScraper/utils/blocklist";
 import { initializeEngineForcing } from "../scraper/WebScraper/utils/engine-forcing";
-import {
-  consumeExtractJobs,
-  consumeExtractDLQ,
-  shutdownExtractQueue,
-  ExtractJobData,
-} from "./extract-queue";
-import { logExtract } from "./logging/log_job";
+import { consumeJobs } from "./worker/nuq/consumer";
+import { extractQueue, ExtractJobData, nuqShutdown } from "./worker/nuq";
 import { jobDurationSeconds } from "../lib/job-metrics";
 import { register } from "prom-client";
 
 configDotenv();
 
-const processExtractJob = async (
-  data: ExtractJobData,
-  ack: () => void,
-  nack: () => void,
-) => {
+const processExtractJob = async (data: ExtractJobData) => {
   const logger = _logger.child({
     module: "extract-worker",
     method: "processExtractJob",
@@ -79,7 +73,6 @@ const processExtractJob = async (
       }
 
       endJobTimer({ status: "success" });
-      ack();
       return;
     } else {
       await updateExtract(data.extractId, {
@@ -95,7 +88,6 @@ const processExtractJob = async (
       }
 
       endJobTimer({ status: "failed" });
-      ack();
       return;
     }
   } catch (error) {
@@ -128,61 +120,10 @@ const processExtractJob = async (
           (error as any)?.message ?? getErrorContactMessage(data.extractId),
       });
     }
-
-    // Ack the message even on error - we've handled it and updated the DB
-    // Only nack if we want to send to DLX (which we don't for handled errors)
-    ack();
   }
 };
 
-const processDLQJob = async (data: ExtractJobData) => {
-  const logger = _logger.child({
-    module: "extract-dlq",
-    extractId: data.extractId,
-    teamId: data.teamId,
-  });
-
-  logger.error("Processing crashed extract job from DLQ");
-
-  // Update the extract status to failed in the database
-  await updateExtract(data.extractId, {
-    status: "failed",
-    error:
-      "Extract job crashed unexpectedly. Please try again or contact support if the issue persists.",
-  });
-
-  await logExtract({
-    id: data.extractId,
-    request_id: data.extractId,
-    urls: data.request.urls,
-    team_id: data.teamId,
-    options: data.request,
-    model_kind: data.request.agent?.model ?? "fire-0",
-    credits_cost: 0,
-    is_successful: false,
-    error:
-      "Extract job crashed unexpectedly. Please try again or contact support if the issue persists.",
-    cost_tracking: undefined,
-  });
-
-  // Send webhook notification
-  const sender = await createWebhookSender({
-    teamId: data.teamId,
-    jobId: data.extractId,
-    webhook: data.request.webhook,
-    v0: false,
-  });
-
-  if (sender) {
-    sender.send(WebhookEvent.EXTRACT_FAILED, {
-      success: false,
-      error:
-        "Extract job crashed unexpectedly. Please try again or contact support if the issue persists.",
-    });
-  }
-
-  logger.info("DLQ job processed - extract marked as failed");
-};
+let shuttingDown = false;
 
 // Start the worker
 const app = Express();
@@ -214,9 +155,7 @@ app.listen(workerPort, (error?: Error) => {
 
 async function shutdown() {
   _logger.info("Shutting down extract worker...");
-  await shutdownExtractQueue();
-  _logger.info("Extract worker shut down");
-  process.exit(0);
+  shuttingDown = true;
 }
 
 if (require.main === module) {
@@ -241,13 +180,20 @@ if (require.main === module) {
 
   initializeEngineForcing();
 
-  _logger.info("Starting extract worker with RabbitMQ...");
+  _logger.info("Starting extract worker on the NuQ extract queue...");
 
-  // Start consuming from both the main queue and the DLQ
-  await Promise.all([
-    consumeExtractJobs(processExtractJob),
-    consumeExtractDLQ(processDLQJob),
-  ]);
+  await consumeJobs({
+    queue: extractQueue,
+    logger: _logger.child({ module: "extract-worker" }),
+    isShuttingDown: () => shuttingDown,
+    jobLogFields: job => ({ extractId: job.id }),
+    process: async job => {
+      await processExtractJob(job.data);
+      return null;
+    },
+  });
 
-  _logger.info("Extract worker started, consuming from RabbitMQ");
+  await nuqShutdown();
+  _logger.info("Extract worker shut down");
+  process.exit(0);
 })();

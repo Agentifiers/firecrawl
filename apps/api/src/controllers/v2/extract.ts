@@ -1,3 +1,5 @@
+// Deployments.ai modification: jobs go to the DynamoDB `extract` NuQ queue
+// instead of RabbitMQ.
 import { v7 as uuidv7 } from "uuid";
 import { Response } from "express";
 import {
@@ -6,7 +8,7 @@ import {
   extractRequestSchema,
   ExtractResponse,
 } from "./types";
-import { addExtractJobToQueue } from "../../services/queue-service";
+import { extractQueue } from "../../services/worker/nuq";
 import { saveExtract } from "../../lib/extract/extract-redis";
 import { UNSUPPORTED_SITE_MESSAGE } from "../../lib/strings";
 import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
@@ -168,10 +170,11 @@ export async function extractController(
     zeroDataRetention: getScrapeZDR(req.acuc?.flags) === "forced",
   });
 
-  await addExtractJobToQueue(extractId, {
-    ...jobData,
-    apiKeyId: req.acuc?.api_key_id ?? undefined,
-  });
+  await extractQueue.addJob(
+    extractId,
+    { ...jobData, apiKeyId: req.acuc?.api_key_id ?? undefined },
+    { ownerId: req.auth.team_id },
+  );
 
   return res.status(200).json({
     success: true,

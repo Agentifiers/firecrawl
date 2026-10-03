@@ -1,3 +1,4 @@
+// Deployments.ai modification: crawl groups come from the DynamoDB NuQ.
 import { Response } from "express";
 import {
   OngoingCrawlsResponse,
@@ -6,7 +7,7 @@ import {
 } from "./types";
 import { getCrawl } from "../../lib/crawl-redis";
 import { configDotenv } from "dotenv";
-import { crawlGroup } from "../../services/worker/nuq-router";
+import { crawlGroup } from "../../services/worker/nuq";
 configDotenv();
 
 export async function ongoingCrawlsController(
