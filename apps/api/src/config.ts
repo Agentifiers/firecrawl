@@ -144,6 +144,10 @@ const configSchema = z.object({
   NUQ_SWEEPER_WORKER_PORT: z.coerce.number().default(3011).catch(3011),
   NUQ_SWEEPER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   EXTRACT_WORKER_PORT: z.coerce.number().default(3004),
+  // Deployments.ai: NuQ claim loops per queue in queue-worker (deep research,
+  // llms.txt, crawl finishing) and extract-worker. Default is upstream's
+  // `.env.example` value; its BullMQ workers fetched jobs concurrently.
+  NUM_WORKERS_PER_QUEUE: z.coerce.number().int().positive().default(8),
 
   // Harness Configuration
   HARNESS_STARTUP_TIMEOUT_MS: z.coerce.number().default(60000),

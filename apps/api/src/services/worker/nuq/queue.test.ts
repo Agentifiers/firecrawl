@@ -1,9 +1,12 @@
 // Deployments.ai modification: NuQ queue invariants against DynamoDB Local
 // (see src/services/dynamo/test-table.ts for the container command).
 import { randomBytes, randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { logger } from "../../../lib/logger";
 import { dynamo, tableName } from "../../dynamo/client";
 import { useTestTable } from "../../dynamo/test-table";
+import { consumeJobs } from "./consumer";
 import { crawlGroup } from "./groups";
 import { jobPk } from "./keys";
 import { NuQ, STALL_TIMEOUT_MS } from "./queue";
@@ -84,6 +87,49 @@ describe("NuQ claims", () => {
     expect(outcomes.filter(Boolean)).toHaveLength(1);
     const job = await queue.getJob("job");
     expect(job?.status === "completed" || job?.status === "failed").toBe(true);
+  });
+
+  it("processes every job exactly once across concurrent consumer loops", async () => {
+    const queue = newQueue("loops");
+    const ids = Array.from({ length: 60 }, () => randomUUID());
+    await queue.addJobs(ids.map(id => ({ id, data: { mode: "single_urls" }, options: {} })));
+
+    const runs = new Map<string, number>();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const consumer = {
+      queue,
+      logger,
+      // Two replicas of eight loops each, all racing for the same jobs.
+      concurrency: 8,
+      isShuttingDown: () => runs.size === ids.length && inFlight === 0,
+      process: async (job: { id: string }) => {
+        runs.set(job.id, (runs.get(job.id) ?? 0) + 1);
+        maxInFlight = Math.max(maxInFlight, ++inFlight);
+        await sleep(25);
+        inFlight--;
+        return { ok: true };
+      },
+    };
+    await Promise.all([consumeJobs(consumer), consumeJobs(consumer)]);
+
+    expect([...runs.keys()].sort()).toEqual([...ids].sort());
+    expect([...runs.values()].every(count => count === 1)).toBe(true);
+    expect(maxInFlight).toBeGreaterThan(1);
+    const jobs = await queue.getJobs(ids);
+    expect(jobs.every(job => job.status === "completed")).toBe(true);
+  });
+
+  it("rejects a non-positive consumer concurrency", async () => {
+    await expect(
+      consumeJobs({
+        queue: newQueue("bad-loops"),
+        logger,
+        concurrency: 0,
+        isShuttingDown: () => true,
+        process: async () => null,
+      }),
+    ).rejects.toThrow("positive integer");
   });
 });
 

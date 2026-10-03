@@ -17,6 +17,12 @@ export type ConsumeOptions<Data, Result> = {
   queue: NuQ<Data, Result>;
   logger: Logger;
   isShuttingDown: () => boolean;
+  /**
+   * Independent claim loops run in this process (default 1). Each loop
+   * holds at most one job; the queue's conditional claim keeps loops from
+   * taking the same job.
+   */
+  concurrency?: number;
   /** Extra log fields for one job. */
   jobLogFields?: (job: NuQJob<Data, Result>) => Record<string, unknown>;
   process: (job: NuQJob<Data, Result>, logger: Logger) => Promise<Result>;
@@ -69,8 +75,8 @@ async function processOne<Data, Result>(
   if (!settled) logger.warn("Could not update job status");
 }
 
-/** Claims and processes jobs one at a time until shutdown is requested. */
-export async function consumeJobs<Data, Result>(
+/** Claims and processes one job at a time until shutdown is requested. */
+async function consumeLoop<Data, Result>(
   options: ConsumeOptions<Data, Result>,
 ): Promise<void> {
   let idle = IDLE_POLL_MIN_MS;
@@ -95,4 +101,18 @@ export async function consumeJobs<Data, Result>(
       options.logger.error("Failed to settle a job", { jobId: job.id, error });
     }
   }
+}
+
+/**
+ * Runs `options.concurrency` claim loops until shutdown is requested; resolves
+ * once every loop's in-flight job has settled.
+ */
+export async function consumeJobs<Data, Result>(
+  options: ConsumeOptions<Data, Result>,
+): Promise<void> {
+  const concurrency = options.concurrency ?? 1;
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(`NuQ consumer concurrency must be a positive integer, got ${concurrency}`);
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => consumeLoop(options)));
 }

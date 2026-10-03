@@ -1,6 +1,7 @@
 // Deployments.ai modification: consumes the DynamoDB `extract` NuQ queue
-// instead of RabbitMQ. A crashed job is failed by the NuQ sweeper (the
-// former dead-letter consumer) after its single allowed stall.
+// instead of RabbitMQ, with NUM_WORKERS_PER_QUEUE claim loops. A crashed job
+// is failed by the NuQ sweeper (the former dead-letter consumer) after its
+// single allowed stall.
 import "dotenv/config";
 import { config } from "../config";
 import "./sentry";
@@ -186,6 +187,7 @@ if (require.main === module) {
     queue: extractQueue,
     logger: _logger.child({ module: "extract-worker" }),
     isShuttingDown: () => shuttingDown,
+    concurrency: config.NUM_WORKERS_PER_QUEUE,
     jobLogFields: job => ({ extractId: job.id }),
     process: async job => {
       await processExtractJob(job.data);

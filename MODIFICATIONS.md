@@ -164,3 +164,19 @@ Dropped features (hosted-only or dependent on removed Redis/RabbitMQ state):
 - Webhook RabbitMQ queueing and `webhook_logs` rows.
 - Crashed extract jobs no longer write an extract log row or send the
   `extract.failed` webhook; the sweeper marks the extract failed.
+
+### 2026-10-02 — NuQ consumer concurrency
+
+- `src/services/worker/nuq/consumer.ts`: `consumeJobs` takes a
+  `concurrency` option and runs that many independent claim loops (default
+  1; the scrape `nuq-worker` keeps one loop per process and scales with
+  `NUQ_WORKER_COUNT`).
+- `src/config.ts`: added `NUM_WORKERS_PER_QUEUE` (positive integer, default
+  8, the value in upstream's `.env.example`). `queue-worker.ts` runs that
+  many loops for each of the deep research, llms.txt and crawl-finished
+  queues, and `extract-worker.ts` for the extract queue. Upstream's BullMQ
+  workers fetched deep research and llms.txt jobs without a fixed limit
+  (gated by `MAX_CPU`/`MAX_RAM`), its crawl-finished loop and RabbitMQ
+  extract consumer (`prefetch(1)`) ran one job at a time.
+- `src/services/worker/nuq/queue.test.ts`: two consumers of eight loops each
+  process 60 jobs exactly once and leave every job completed.

@@ -1,8 +1,8 @@
 // Deployments.ai modification: the deep research and llms.txt queues moved
 // from BullMQ (Redis) to the DynamoDB NuQ, and all three queues here run on
-// the shared NuQ consumer loop (claim, renew, settle). Each queue is
-// processed one job at a time per process; scale with more queue-worker
-// replicas. Monitor scheduling (hosted-only, Redis/RabbitMQ) is removed.
+// the shared NuQ consumer loop (claim, renew, settle) with
+// NUM_WORKERS_PER_QUEUE loops per queue. Monitor scheduling (hosted-only,
+// Redis/RabbitMQ) is removed.
 import "dotenv/config";
 import { config } from "../config";
 import "./sentry";
@@ -230,23 +230,27 @@ app.listen(workerPort, (error?: Error) => {
   initializeEngineForcing();
 
   const isShuttingDownFn = () => isShuttingDown;
+  const concurrency = config.NUM_WORKERS_PER_QUEUE;
   await Promise.all([
     consumeJobs({
       queue: deepResearchQueue,
       logger: _logger.child({ module: "deep-research-worker" }),
       isShuttingDown: isShuttingDownFn,
+      concurrency,
       process: processDeepResearchJob,
     }),
     consumeJobs({
       queue: llmsTxtQueue,
       logger: _logger.child({ module: "generate-llmstxt-worker" }),
       isShuttingDown: isShuttingDownFn,
+      concurrency,
       process: processGenerateLlmsTxtJob,
     }),
     consumeJobs({
       queue: crawlFinishedQueue,
       logger: _logger.child({ module: "crawl-finish-worker" }),
       isShuttingDown: isShuttingDownFn,
+      concurrency,
       jobLogFields: job => ({ crawlId: job.groupId }),
       process: processFinishCrawlJob,
     }),
