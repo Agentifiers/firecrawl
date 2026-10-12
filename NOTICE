@@ -1,22 +1,23 @@
-Firecrawl API (vendored and modified)
+Firecrawl API (modified fork)
 
-This directory contains a modified copy of the Firecrawl API server and its
-in-tree build dependencies, originally published by the Firecrawl authors
-(Mendable) at https://github.com/firecrawl/firecrawl. Upstream states that the
-project is primarily licensed under AGPL-3.0; the vendored subset contains no
-separately MIT-licensed SDK or UI code.
+This repository is a modified fork of Firecrawl, originally published by the
+Firecrawl authors (Mendable) at https://github.com/firecrawl/firecrawl. It
+keeps upstream's API server (apps/api) and its in-tree build dependencies.
+Upstream states that the project is primarily licensed under AGPL-3.0; this
+fork contains no separately MIT-licensed SDK or UI code.
 
 Upstream commit: ece430987522c929ca45aa2e49495c237552988b
 Upstream path:   apps/api
 Upstream image:  ghcr.io/firecrawl/firecrawl@sha256:998ff6d4d3d1be5ac6872aa4a2561089e3782b6d112aa4586f90f4feb842cb76
                  (FIRECRAWL_BUILD_SHA=ece430987522c929ca45aa2e49495c237552988b)
 
-The program in this directory is licensed under the GNU Affero General Public
-License version 3 (see LICENSE). It is a separate program from the rest of
-this repository: platform code talks to it only over HTTP and does not link,
-import, or bundle any file from this directory. Changes made by
-Deployments.ai are listed, with dates, in MODIFICATIONS.md as required by
-section 5(a) of the license, and are released under the same license.
+The program in this repository is licensed under the GNU Affero General Public
+License version 3 (see LICENSE). Changes made by Deployments.ai are listed,
+with dates, in MODIFICATIONS.md as required by section 5(a) of the license,
+and are released under the same license. The commits after the upstream commit
+above hold the exact diffs.
 
-The complete corresponding source of every image built from this directory is
-this directory at the commit recorded in that image's release manifest.
+The complete corresponding source of every image built from this repository
+is this repository at the commit recorded in the image's
+org.opencontainers.image.revision label and FIRECRAWL_BUILD_SHA environment
+variable.

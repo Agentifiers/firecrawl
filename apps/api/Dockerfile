@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Build context: third_party/firecrawl (see MODIFICATIONS.md).
+# Build context: the repository root (see MODIFICATIONS.md).
 FROM node:22-slim AS base
 
 ENV PNPM_HOME="/pnpm"
