@@ -82,10 +82,12 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/native ./native
 COPY --from=build /app/BUILD_SHA ./BUILD_SHA
 COPY LICENSE NOTICE MODIFICATIONS.md ./
+# The table definition consumers read from the image (see MODIFICATIONS.md).
+COPY apps/api/src/services/dynamo/dynamodb-table.json ./dynamodb-table.json
 
 # Copy Go shared library
 COPY --from=go-build /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so ./sharedLibs/go-html-to-md/
 
-RUN node -e 'const fs = require("fs"); for (const p of ["dist/src/harness.js", "dist/src/services/worker/nuq-sweeper-worker.js", "BUILD_SHA"]) { if (!fs.statSync(p).size) throw new Error(`${p} missing or empty`); }'
+RUN node -e 'const fs = require("fs"); for (const p of ["dist/src/harness.js", "dist/src/services/worker/nuq-sweeper-worker.js", "dist/src/services/dynamo/dynamodb-table.json", "BUILD_SHA", "dynamodb-table.json"]) { if (!fs.statSync(p).size) throw new Error(`${p} missing or empty`); }'
 
 CMD ["node", "dist/src/harness.js", "--start-docker"]
