@@ -239,3 +239,25 @@ Dropped features (hosted-only or dependent on removed Redis/RabbitMQ state):
 - Added `.github/workflows/image.yml`, which builds the `linux/arm64` image
   from each commit on `main` and publishes it to
   `ghcr.io/agentifiers/firecrawl` tagged with the commit SHA.
+
+### 2026-10-14 — table definition contract and versioned releases
+
+- Added `apps/api/src/services/dynamo/dynamodb-table.json`, the single
+  definition of the DynamoDB table (format `version` 1: billing mode, key
+  schema, attribute types, TTL attribute, global secondary indexes with their
+  projections). `table-schema.ts` builds the `CreateTable` and
+  `UpdateTimeToLive` calls of `ensureTable` from it and no longer holds the
+  table shape; `table-schema.test.ts` proves those calls equal the file.
+  `tsconfig.json` enables `resolveJsonModule` for the import.
+- `apps/api/Dockerfile`: the runtime image ships the definition at
+  `/app/dynamodb-table.json` and the build check requires it, so
+  infrastructure can create the AWS table from the image it deploys.
+- `.github/workflows/image.yml`: commits on `main` publish only the
+  `:<commit-sha>` tag (the mutable `:main` tag is gone), with SLSA provenance
+  (`mode=max`) and an SBOM; actions are pinned by commit SHA and each job
+  holds only the permissions it uses.
+- Added `.github/workflows/release.yml`: a dispatch with a semantic `version`
+  builds the dispatched commit, publishes `:<version>` and `:<commit-sha>`,
+  creates the `v<version>` tag (refusing an existing one) and a GitHub
+  Release whose notes give the image digest and which attaches
+  `dynamodb-table.json`.

@@ -30,14 +30,21 @@ this fork; use upstream for those.
 
 ## Image
 
-Each commit on `main` publishes a `linux/arm64` image:
+Releases are versioned. Dispatching the `Release` workflow with a semantic
+version builds a `linux/arm64` image from the dispatched commit, publishes it as
+`ghcr.io/agentifiers/firecrawl:<version>` and `:<commit-sha>`, tags the commit
+`v<version>`, and creates a GitHub Release whose notes give the image digest
+and which attaches the image's `dynamodb-table.json`:
 
 ```sh
-docker pull ghcr.io/agentifiers/firecrawl:<commit-sha>
+docker pull ghcr.io/agentifiers/firecrawl:<version>@sha256:<digest>
 ```
 
-Pin images by digest. An image's `org.opencontainers.image.revision` label and
-`FIRECRAWL_BUILD_SHA` environment variable name the commit it was built from.
+Each commit on `main` also publishes `ghcr.io/agentifiers/firecrawl:<commit-sha>`.
+There is no moving tag; pin images by digest. Every image carries SLSA
+provenance and an SPDX SBOM attestation. An image's
+`org.opencontainers.image.revision` label and `FIRECRAWL_BUILD_SHA` environment
+variable name the commit it was built from.
 
 To build it yourself, use the repository root as the build context:
 
@@ -58,15 +65,19 @@ this fork adds:
 | `NUM_WORKERS_PER_QUEUE` | NuQ claim loops per queue in the queue and extract workers (default 8) |
 | `NUQ_SWEEPER_INTERVAL_MS` | Sweeper polling interval (default 5000) |
 
-The table's key schema and indexes are defined in
-[`apps/api/src/services/dynamo/table-schema.ts`](apps/api/src/services/dynamo/table-schema.ts).
-On AWS, create the table with your infrastructure code from that definition.
-Against DynamoDB Local, the image creates it:
+The table's key schema, attribute types, billing mode, TTL attribute, and
+indexes are defined once, in
+[`apps/api/src/services/dynamo/dynamodb-table.json`](apps/api/src/services/dynamo/dynamodb-table.json)
+(field names follow the OpenTofu/Terraform `aws_dynamodb_table` arguments; its
+`version` names the format). The image ships the file at
+`/app/dynamodb-table.json`, so infrastructure code can read the definition of
+the exact image it deploys and create the table on AWS from it. Against
+DynamoDB Local, the image creates it from the same file:
 
 ```sh
 docker run --rm -e FIRECRAWL_DYNAMODB_TABLE=firecrawl \
   -e FIRECRAWL_DYNAMODB_ENDPOINT=http://dynamodb-local:8000 \
-  ghcr.io/agentifiers/firecrawl:<commit-sha> node dist/src/services/dynamo/create-table.js
+  ghcr.io/agentifiers/firecrawl:<version> node dist/src/services/dynamo/create-table.js
 ```
 
 The default command, `node dist/src/harness.js --start-docker`, starts the API
